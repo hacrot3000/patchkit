@@ -8,6 +8,8 @@ from util import stdlib
 from util.elffile import EM
 from util.patch.dis import irdis, IR, IRStream
 
+addedPatchAddress = []
+
 def pfcol(s):
     return '[\033[1m\033[32m%s\033[0m] ' % s
 
@@ -369,6 +371,7 @@ class Context(object):
         desc = kwargs.get('desc', '')
         checkDep = kwargs.get('checkDep', False)
         ijAddr = kwargs.get('ijAddr', 0)
+        ignoreDuplicate = kwargs.get('ignoreDuplicate', False)
 
 
         lastNewAsm = ""
@@ -385,12 +388,18 @@ class Context(object):
 
         needAddJump = (lastNewAsm[0].lower() !="jmp" and lastNewAsm[0].lower() !="ret" and lastNewAsm[0].lower() !="retn") 
 
-        if not checkDep:
-            self.info("")
-
         oldSize = self.checksize(addr, asm=oldAsm, is_asm=True)
 
         realNextAddress = nextAddress = addr + oldSize
+
+        if not checkDep:
+            self.info("")
+
+            if ignoreDuplicate == False and addr in addedPatchAddress:
+                self.error('Address already has a patch from ' + hex(addr) + " to " + hex(realNextAddress - 1))
+                raise Exception("Add param ignoreDuplicate to ignore this.")
+
+            addedPatchAddress.append(addr)
 
         if len(postAsm) > 0:
             postAsm = postAsm.replace("0xRealReturnAddress", "0x%x" % realNextAddress)
