@@ -338,7 +338,7 @@ class Context(object):
             return
         ret = ""
         for x in range(number):
-            ret = ret + "nop;"  
+            ret = ret + "nop;"
         return ret
 
     def checksize(self, addr, **kwargs):
@@ -360,7 +360,7 @@ class Context(object):
 
         hnewStr = "".join([hex(ord(x)) for x in newStr]).replace("0x", "")
 
-        self.patch(addr, hex=hnewStr, desc=desc)        
+        self.patch(addr, hex=hnewStr, desc=desc)
 
 
     def autoApplyPatch(self, addr, **kwargs):
@@ -386,7 +386,7 @@ class Context(object):
 
         lastNewAsm = lastNewAsm.split(" ")
 
-        needAddJump = (lastNewAsm[0].lower() !="jmp" and lastNewAsm[0].lower() !="ret" and lastNewAsm[0].lower() !="retn") 
+        needAddJump = (lastNewAsm[0].lower() !="jmp" and lastNewAsm[0].lower() !="ret" and lastNewAsm[0].lower() !="retn")
 
         oldSize = self.checksize(addr, asm=oldAsm, is_asm=True)
 
@@ -396,7 +396,7 @@ class Context(object):
             self.info("")
 
             if ignoreDuplicate == False and addr in addedPatchAddress:
-                self.error('Address already has a patch from ' + hex(addr) + " to " + hex(realNextAddress - 1))
+                self.error('Address already has a patch from ' + hex(addr) + " to " + hex(realNextAddress - 1) + " set ignoreDuplicate to True to ignore this.")
                 raise Exception("Add param ignoreDuplicate to ignore this.")
 
             addedPatchAddress.append(addr)
@@ -426,7 +426,7 @@ class Context(object):
                 adding = ""
                 jmpSize = 0
             #check if we can use jmp instead of nop
-            
+
             if oldSize - newSize <= jmpSize + 6:    #If the remaining space is less than 6 nop in case we add jmp, just ignore the jump and add nop only
                 adding = self.genNop(oldSize - newSize)
             else: #if oldSize - newSize - jmpSize > 0:   #Otherwise, if enough space for jump, just add it
