@@ -85,6 +85,23 @@
                 "isDefault": false
             }
         },
-
+        {
+            "label": "Git add all changed (exclude new file)",
+            "type": "shell",
+            "command": "cd ${MyProjectHTP}/patchkit && git add -u",
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
+            "label": "Git commit",
+            "type": "shell",
+            "command": "cd ${MyProjectHTP}/patchkit && git commit -m 'Update patch'",
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
     ]
 }
