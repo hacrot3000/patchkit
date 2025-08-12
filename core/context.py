@@ -436,7 +436,7 @@ class Context(object):
         else: #newSize > oldSize: not enough space to insert
             if checkDep:
                 self.error(hex(addr) + " Cannot create jump:\"" + newAsm + "\" (" + str(newSize) + " byte) to replace \"" + oldAsm + "\" (" + str(oldSize) + " byte)")
-                return
+                quit()
             if desc:
                 desc = ' | "%s"' % desc
 
