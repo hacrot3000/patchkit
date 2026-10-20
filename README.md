@@ -202,3 +202,25 @@ Dependencies
   - Capstone Engine - https://github.com/aquynh/capstone.git
   - Keystone Engine - https://github.com/keystone-engine/keystone.git
   - Unicorn Engine  - https://github.com/unicorn-engine/unicorn.git
+
+
+## iOS IPA patching (experimental)
+
+New: `python3 ipa_patch.py` patches an iOS IPA offline using a JSON manifest.
+It supports fixed-size ARM64/ARM64e Mach-O byte or Keystone assembly
+replacements, exact-byte preconditions, resource replacements, ZIP repacking,
+and optional macOS codesign re-signing. This is a separate Python 3 workflow;
+the legacy `./patch` ELF tool is unchanged.
+
+Quick start (unre-signed output, **not installable**):
+
+```sh
+python3 ipa_patch.py input.ipa patches.json -o output.ipa --allow-unsigned
+```
+
+For a signed IPA, use `--sign-identity` on macOS with the right signing
+certificate and, where needed, `--entitlements` and `--profile`.
+
+See [IPA patch documentation](docs/IPA_PATCHING.md) for the manifest
+schema, examples, required signing, supported operations and limitations.
+Automatic Mach-O injection/hooking is **not yet implemented**.
