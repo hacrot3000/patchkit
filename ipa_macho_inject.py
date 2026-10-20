@@ -77,6 +77,69 @@ def _copyable_stolen(disassembler, constants, original, address):
     return original
 
 
+
+def _validate_relocatable_stolen(disassembler, constants, original, address):
+    if len(original) < 4 or len(original) % 4:
+        raise IPAError("Hook must overwrite whole ARM64 instructions")
+    instructions = list(disassembler.disasm(original, address))
+    if len(instructions) != len(original) // 4:
+        raise IPAError("Cannot decode all overwritten ARM64 instructions")
+    for instruction in instructions:
+        if instruction.mnemonic.lower() in ("adr", "adrp"):
+            if (len(instruction.operands) < 2 or
+                    instruction.operands[-1].type != constants.ARM64_OP_IMM or
+                    not instruction.op_str.split(",")[0].strip().startswith("x")):
+                raise IPAError("Unsupported ADR/ADRP operands")
+        else:
+            _copyable_stolen(disassembler, constants, instruction.bytes,
+                             instruction.address)
+
+
+def _relocate_stolen(disassembler, constants, assembler, original, address,
+                     trampoline_address, original_binary, rebuilt_binary):
+    """Relocate safe ARM64 instructions, including ADR and ADRP.
+
+    A PC-relative destination must map into a known section after LIEF
+    relayout. Other kinds (BL, literal load, conditional branch, PAC/BTI)
+    are intentionally rejected rather than silently copied.
+    """
+    _validate_relocatable_stolen(disassembler, constants, original, address)
+    relocated = bytearray()
+    for instruction in disassembler.disasm(original, address):
+        mnemonic = instruction.mnemonic.lower()
+        if mnemonic not in ("adr", "adrp"):
+            relocated.extend(instruction.bytes)
+            continue
+        destination = int(instruction.operands[-1].imm)
+        section = original_binary.section_from_virtual_address(destination)
+        if section is None or not section.segment_name:
+            raise IPAError("Cannot remap ADR/ADRP target outside known section")
+        new_section = rebuilt_binary.get_section(section.segment_name, section.name)
+        if new_section is None:
+            raise IPAError("ADR/ADRP destination section missing after rebuild")
+        destination = int(new_section.virtual_address) + destination - int(section.virtual_address)
+        register = instruction.op_str.split(",")[0].strip()
+        pc = trampoline_address + len(relocated)
+        if mnemonic == "adrp":
+            script = "adrp %s, #0x%x" % (register, destination & ~0xfff)
+            payload = _assemble(assembler, script, pc)
+        elif -(1 << 20) <= destination - pc < (1 << 20):
+            payload = _assemble(assembler, "adr %s, #0x%x" % (
+                register, destination), pc)
+        else:
+            # ADR has +/-1MiB reach. ADRP+ADD preserves register semantics
+            # without borrowing a scratch register and is PC/ASLR-relative.
+            payload = _assemble(
+                assembler,
+                "adrp %s, #0x%x; add %s, %s, #0x%x" % (
+                    register, destination & ~0xfff, register, register,
+                    destination & 0xfff
+                ), pc
+            )
+        relocated.extend(payload)
+    return bytes(relocated)
+
+
 def _verify_hook(source, hook, disassembler, constants):
     if "address" not in hook:
         raise IPAError("hook_arm64 requires address")
@@ -101,7 +164,7 @@ def _verify_hook(source, hook, disassembler, constants):
     if mode not in ("before", "replace"):
         raise IPAError("hook_arm64 mode must be before or replace")
     if mode == "before":
-        _copyable_stolen(disassembler, constants, expected, addr)
+        _validate_relocatable_stolen(disassembler, constants, expected, addr)
         if not isinstance(hook.get("asm"), str):
             raise IPAError("before hook requires asm")
     elif not isinstance(hook.get("symbol"), str):
@@ -354,7 +417,11 @@ def expand_macho(path, operations, report=None):
                 current_addr = int(relocated.virtual_address) + delta
                 if mode == "before":
                     body = _assemble(assembler, item["asm"], address)
-                    payload = body + stolen
+                    replay = _relocate_stolen(
+                        disassembler, constants, assembler, stolen, old_addr,
+                        address + len(body), binary, rebuilt_binary
+                    )
+                    payload = body + replay
                     payload += _branch(address + len(payload), current_addr + len(stolen))
                     pending.append((current_addr, stolen, address))
                 else:
