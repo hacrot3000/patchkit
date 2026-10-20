@@ -5,7 +5,9 @@ This module deliberately supports *in-place, fixed-size* ARM64 edits only.
 Mach-O segment growth, relocation, injection and hooks are not implemented.
 """
 import argparse
+import hashlib
 import json
+import re
 import os
 import plistlib
 import shutil
@@ -175,9 +177,37 @@ def arm64_slice(data, flavor="arm64"):
         if cpu == ARM64 and ((subtype & 0xff) == 2) == (wanted == 2):
             if data[offset:offset + 4] != MACHO_64_LE:
                 raise IPAError("FAT entry does not contain an ARM64 Mach-O")
-            return Slice(offset, size, subtype)
+            selected = Slice(offset, size, subtype)
+            check_unencrypted(data, selected)
+            return selected
     raise IPAError("Mach-O has no %s slice" % flavor)
 
+
+
+def check_unencrypted(data, selected):
+    """Reject FairPlay/encrypted Mach-O code, which cannot be patched this way."""
+    base, end = selected.offset, selected.offset + selected.size
+    if base + 32 > end:
+        raise IPAError("Truncated Mach-O header")
+    _, _, _, _, count, commands_size, _, _ = struct.unpack_from(
+        "<IiiIIIII", data, base
+    )
+    cursor, limit = base + 32, base + 32 + commands_size
+    if count > 4096 or limit > end:
+        raise IPAError("Invalid Mach-O load commands")
+    for _ in range(count):
+        if cursor + 8 > limit:
+            raise IPAError("Truncated Mach-O load command")
+        cmd, size = struct.unpack_from("<II", data, cursor)
+        if size < 8 or cursor + size > limit:
+            raise IPAError("Malformed Mach-O load command")
+        if cmd in (0x21, 0x2C):
+            if size < 20:
+                raise IPAError("Truncated Mach-O encryption command")
+            encrypted = struct.unpack_from("<I", data, cursor + 16)[0]
+            if encrypted:
+                raise IPAError("Encrypted Mach-O (FairPlay) cannot be patched")
+        cursor += size
 
 def address_to_offset(data, selected, address):
     base, end = selected.offset, selected.offset + selected.size
@@ -364,6 +394,16 @@ def apply(ipa, manifest, output, *, allow_unsigned=False, sign_identity=None,
     operations = spec.get("operations") if isinstance(spec, dict) else None
     if not isinstance(operations, list) or not operations:
         raise IPAError("Manifest must contain a nonempty operations array")
+    source_hash = spec.get("input_sha256")
+    if source_hash is not None:
+        if not isinstance(source_hash, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", source_hash):
+            raise IPAError("input_sha256 must be 64 hexadecimal characters")
+        digest = hashlib.sha256()
+        with ipa.open("rb") as original:
+            for block in iter(lambda: original.read(1024 * 1024), b""):
+                digest.update(block)
+        if digest.hexdigest().lower() != source_hash.lower():
+            raise IPAError("Input IPA SHA256 does not match manifest")
     with tempfile.TemporaryDirectory(prefix="patchkit-ipa-") as temp:
         root = Path(temp)
         extract_ipa(ipa, root, max_unpacked_mib * 1024 * 1024)
