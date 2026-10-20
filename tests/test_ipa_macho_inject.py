@@ -294,6 +294,27 @@ class MachOIntegration(unittest.TestCase):
         if insns[0].mnemonic == "adr":
             self.assertEqual(insns[0].operands[-1].imm, new_addr + 4)
 
+    def test_inject_and_hook_framework_executable(self):
+        import json
+        import lief
+        target = "Frameworks/Library.framework/Library"
+        with zipfile.ZipFile(self.ipa, "a") as archive:
+            archive.write(self.binary, "Payload/Test.app/" + target)
+        self.manifest.write_text(json.dumps({"operations": [
+            {"type": "inject_arm64", "target": target,
+             "name": "framework_code", "asm": "mov x0, #7; ret"},
+            {"type": "hook_arm64", "target": target, "mode": "replace",
+             "address": hex(self.address), "expected_hex": "1f2003d5",
+             "symbol": "framework_code"}
+        ]}))
+        apply(self.ipa, self.manifest, self.out, allow_unsigned=True)
+        with zipfile.ZipFile(self.out) as archive:
+            main = archive.read("Payload/Test.app/test_arm64")
+            framework = archive.read("Payload/Test.app/" + target)
+        self.assertNotIn(b"__PKTEXT", main)
+        self.assertIsNotNone(lief.MachO.parse(framework).at(0).get_segment("__PKTEXT"))
+        self.assertNotEqual(main, framework)
+
     def test_auto_patch_arm64_inline(self):
         import lief
         raw = self.patch([{
