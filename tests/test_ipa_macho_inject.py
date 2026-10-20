@@ -35,6 +35,26 @@ class BranchValidation(unittest.TestCase):
         with self.assertRaisesRegex(IPAError, "reach"):
             _branch(0x1000, 0x1000 + (1 << 27))
 
+    def test_far_detour_is_aslr_relative(self):
+        from ipa_macho_inject import _detour
+        from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM, arm64_const
+        src, dst = 0x100000000, 0x130001234
+        with self.assertRaisesRegex(IPAError, "long_branch"):
+            _detour(src, dst)
+        raw = _detour(src, dst, permit_x16=True)
+        self.assertEqual(len(raw), 12)
+        self.assertEqual(raw[8:12], bytes.fromhex("00021fd6"))  # BR x16
+        decoder = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        decoder.detail = True
+        insns = list(decoder.disasm(raw, src))
+        self.assertEqual([i.mnemonic for i in insns], ["adrp", "add", "br"])
+        self.assertEqual(insns[0].operands[1].imm + insns[1].operands[2].imm, dst)
+
+    def test_far_detour_rejects_outside_adrp_range(self):
+        from ipa_macho_inject import _detour
+        with self.assertRaisesRegex(IPAError, "21-bit"):
+            _detour(0x1000, 0x1000 + (1 << 34), permit_x16=True)
+
     @unittest.skipUnless(HAVE_NATIVE, "Capstone/Keystone not installed")
     def test_refuses_pc_relative_relocation(self):
         from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM, arm64_const
@@ -163,6 +183,48 @@ class MachOIntegration(unittest.TestCase):
         pos = address_to_offset(raw, selected, current)
         word, = struct.unpack_from("<I", raw, pos)
         self.assertEqual(word & 0xFC000000, 0x14000000)
+
+    def test_far_replace_hook_requires_opt_in_and_12_bytes(self):
+        import json
+        from unittest.mock import patch as mock_patch
+        from ipa_macho_inject import expand_macho
+        original = self.binary.read_bytes()
+        # Original function starts NOP; MOV X0, #0; RET (12 bytes).
+        with mock_patch("ipa_macho_inject.BRANCH_RANGE", 4):
+            self.manifest.write_text(json.dumps({"operations": [
+                {"type": "inject_arm64", "name": "replacement",
+                 "asm": "mov x0, #7; ret"},
+                {"type": "hook_arm64", "mode": "replace",
+                 "address": hex(self.address), "expected_hex": "1f2003d5",
+                 "symbol": "replacement", "long_branch": "x16"},
+            ]}))
+            with self.assertRaisesRegex(IPAError, "requires 12 original bytes"):
+                apply(self.ipa, self.manifest, self.out, allow_unsigned=True)
+            self.assertFalse(self.out.exists())
+            self.manifest.write_text(json.dumps({"operations": [
+                {"type": "inject_arm64", "name": "replacement",
+                 "asm": "mov x0, #7; ret"},
+                {"type": "hook_arm64", "mode": "replace",
+                 "address": hex(self.address),
+                 "expected_hex": "1f2003d5" + "000080d2" + "c0035fd6",
+                 "symbol": "replacement", "long_branch": "x16"},
+            ]}))
+            apply(self.ipa, self.manifest, self.out, allow_unsigned=True)
+        import lief
+        with zipfile.ZipFile(self.out) as z:
+            raw = z.read("Payload/Test.app/test_arm64")
+        image = lief.MachO.parse(raw).at(0)
+        current = int(image.get_section("__text").virtual_address)
+        pos = address_to_offset(raw, arm64_slice(raw), current)
+        self.assertEqual(raw[pos+8:pos+12], bytes.fromhex("00021fd6"))
+        executable = self.root / (self._testMethodName + "-program")
+        executable.write_bytes(raw)
+        executable.chmod(0o755)
+        subprocess.run(["codesign", "--force", "--sign", "-",
+                        "--timestamp=none", str(executable)],
+                       capture_output=True, check=True)
+        proc = subprocess.run([str(executable)], capture_output=True, timeout=10)
+        self.assertEqual(proc.returncode, 7, proc.stderr)
 
     def test_mismatched_original_fails_closed(self):
         import json
