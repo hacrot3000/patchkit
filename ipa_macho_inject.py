@@ -124,6 +124,53 @@ def _encode_add_low12(register, value):
                        (register << 5) | register)
 
 
+def _pc_branch_spec(word):
+    """Return (immediate bits, position) for supported ARM64 PC-relative branches.
+
+    Encodings: B/BL imm26, B.cond and CBZ/CBNZ imm19, TBZ/TBNZ imm14.
+    Indirect branches and other control-flow instructions remain forbidden.
+    """
+    if word & 0x7C000000 == 0x14000000:  # B / BL
+        return 26, 0
+    if word & 0xFF000010 == 0x54000000:  # B.cond, not reserved bit4
+        return 19, 5
+    if word & 0x7E000000 == 0x34000000:  # CBZ / CBNZ
+        return 19, 5
+    if word & 0x7E000000 == 0x36000000:  # TBZ / TBNZ
+        return 14, 5
+    return None
+
+
+def _relocate_pc_branch(raw, old_pc, new_pc, sections, rebuilt_binary,
+                        old_block_start, old_block_end):
+    """Relocate an external branch without changing condition, tested operands or LR.
+
+    Refuse targets within stolen instructions: those need an instruction-level
+    trampoline map and cannot safely branch to the overwritten original bytes.
+    Refuse out-of-range targets rather than expanding conditional control flow.
+    """
+    if len(raw) != 4:
+        raise IPAError("ARM64 branch must be one 4-byte instruction")
+    word, = struct.unpack("<I", raw)
+    spec = _pc_branch_spec(word)
+    if spec is None:
+        raise IPAError("Unsupported ARM64 PC-relative branch")
+    bits, shift = spec
+    mask = (1 << bits) - 1
+    immediate = (word >> shift) & mask
+    if immediate & (1 << (bits - 1)):
+        immediate -= 1 << bits
+    old_target = old_pc + immediate * 4
+    if old_block_start <= old_target < old_block_end:
+        raise IPAError("Branch into overwritten instruction range is unsafe")
+    new_target = _remap_section_address(old_target, sections, rebuilt_binary)
+    delta = new_target - new_pc
+    if delta % 4 or not -(1 << (bits + 1)) <= delta < (1 << (bits + 1)):
+        raise IPAError("Relocated conditional/PC-relative branch is out of reach")
+    encoded = (word & ~(mask << shift)) | (((delta // 4) & mask) << shift)
+    return struct.pack("<I", encoded)
+
+
 def _validate_relocatable_stolen(disassembler, constants, original, address):
     if len(original) < 4 or len(original) % 4:
         raise IPAError("Hook must overwrite whole ARM64 instructions")
@@ -132,7 +179,12 @@ def _validate_relocatable_stolen(disassembler, constants, original, address):
         raise IPAError("Cannot decode all overwritten ARM64 instructions")
     for instruction in instructions:
         name = instruction.mnemonic.lower()
-        if name in ("adr", "adrp"):
+        word, = struct.unpack("<I", instruction.bytes)
+        if _pc_branch_spec(word) is not None:
+            if (not instruction.operands or
+                    instruction.operands[-1].type != constants.ARM64_OP_IMM):
+                raise IPAError("Unsupported ARM64 branch target operands")
+        elif name in ("adr", "adrp"):
             if (len(instruction.operands) < 2 or
                     instruction.operands[-1].type != constants.ARM64_OP_IMM or
                     not instruction.op_str.split(",")[0].strip().startswith("x")):
@@ -183,14 +235,23 @@ def _relocate_stolen(disassembler, constants, assembler, original, address,
                      trampoline_address, original_sections_snapshot, rebuilt_binary):
     """Relocate safe ARM64 instructions, including ADR and ADRP.
 
-    A PC-relative destination must map into a known section after LIEF
-    relayout. Other kinds (BL, literal load, conditional branch, PAC/BTI)
-    are intentionally rejected rather than silently copied.
+    PC-relative destinations must map into known sections after LIEF
+    relayout. External B/BL, B.cond, CBZ/CBNZ, TBZ/TBNZ and literal loads
+    retain their original opcode and are only rewritten when in reach.
+    Branches into the stolen region and PAC/BTI remain rejected.
     """
     _validate_relocatable_stolen(disassembler, constants, original, address)
     relocated = bytearray()
     for instruction in disassembler.disasm(original, address):
         mnemonic = instruction.mnemonic.lower()
+        word, = struct.unpack("<I", instruction.bytes)
+        if _pc_branch_spec(word) is not None:
+            relocated.extend(_relocate_pc_branch(
+                instruction.bytes, instruction.address,
+                trampoline_address + len(relocated), original_sections_snapshot,
+                rebuilt_binary, address, address + len(original)
+            ))
+            continue
         if (mnemonic in ("ldr", "ldrsw") and instruction.operands and
                 instruction.operands[-1].type == constants.ARM64_OP_IMM):
             relocated.extend(_encode_literal_load(
