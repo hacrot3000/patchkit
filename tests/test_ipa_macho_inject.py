@@ -90,7 +90,7 @@ class MachOIntegration(unittest.TestCase):
         cls.root = Path(cls.tmp.name)
         cls.binary = cls.root / "test_arm64"
         cls.source = cls.root / "test_arm64.s"
-        cls.source.write_text(".globl _main\n.p2align 2\n_main:\n nop\n mov x0, #0\n ret\n.p2align 3\n_probe_literal:\n .quad 7\n")
+        cls.source.write_text(".globl _main\n.p2align 2\n_main:\n nop\n mov x0, #0\n ret\n.p2align 3\n_probe_literal:\n .quad 7\n.section __TEXT,__cstring,cstring_literals\n.p2align 2\n_data_string:\n.asciz \"ABCDEFGH\"\n")
         compiler = shutil.which("clang")
         if sys.platform != "darwin" or not compiler:
             raise unittest.SkipTest("Real Mach-O fixture is compiled on macOS CI")
@@ -367,6 +367,25 @@ class MachOIntegration(unittest.TestCase):
                                       capture_output=True, timeout=10)
                 self.assertEqual(proc.returncode, exit_code,
                                  "%s: %r" % (label, proc.stderr))
+
+    def test_refuses_hook_inside_rx_cstring_data(self):
+        import json
+        import lief
+        image = lief.MachO.parse(str(self.binary)).at(0)
+        section = image.get_section("__cstring")
+        self.assertIsNotNone(section)
+        self.assertEqual(int(section.virtual_address) % 4, 0)
+        self.manifest.write_text(json.dumps({"operations": [
+            {"type": "inject_arm64", "name": "replacement",
+             "asm": "ret"},
+            {"type": "hook_arm64", "mode": "replace",
+             "address": hex(int(section.virtual_address)),
+             "expected_hex": "4142434445464748",
+             "symbol": "replacement"}
+        ]}))
+        with self.assertRaisesRegex(IPAError, "instruction section"):
+            apply(self.ipa, self.manifest, self.out, allow_unsigned=True)
+        self.assertFalse(self.out.exists())
 
     def test_reject_branch_into_stolen_region(self):
         # B to itself remains inside the original overwritten region.
