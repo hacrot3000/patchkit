@@ -260,6 +260,42 @@ class MachOIntegration(unittest.TestCase):
         self.assertEqual(proc.returncode, 7,
                          "Mach-O did not execute injected code: %r" % proc.stderr)
 
+    def test_before_hook_relocates_adr_target_after_relayout(self):
+        from keystone import Ks, KS_ARCH_ARM64, KS_MODE_LITTLE_ENDIAN
+        import lief
+        encoder = Ks(KS_ARCH_ARM64, KS_MODE_LITTLE_ENDIAN)
+        original = "adr x0, #0x%x" % (self.address + 4)
+        encoded, _ = encoder.asm(original, addr=self.address)
+        raw = self.patch([
+            {"type": "arm64_asm", "address": hex(self.address),
+             "expected_hex": "1f2003d5", "asm": original},
+            {"type": "hook_arm64", "mode": "before",
+             "address": hex(self.address), "expected_hex": bytes(encoded).hex(),
+             "asm": "nop"},
+        ])
+        image = lief.MachO.parse(raw).at(0)
+        new_addr = int(image.get_section("__text").virtual_address)
+        selected = arm64_slice(raw)
+        patched_at = address_to_offset(raw, selected, new_addr)
+        word, = struct.unpack_from("<I", raw, patched_at)
+        self.assertEqual(word & 0xFC000000, 0x14000000)
+        disp = word & 0x03FFFFFF
+        if disp & (1 << 25):
+            disp -= 1 << 26
+        trampoline_addr = new_addr + disp * 4
+        trampoline_at = address_to_offset(raw, selected, trampoline_addr)
+        self.assertEqual(raw[trampoline_at:trampoline_at + 4],
+                         bytes.fromhex("1f2003d5"))
+        # The emitted ADR or ADRP+ADD must point into the *relocated* __text.
+        from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM, arm64_const
+        cs = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        cs.detail = True
+        insns = list(cs.disasm(raw[trampoline_at+4:trampoline_at+12],
+                              trampoline_addr + 4))
+        self.assertTrue(insns and insns[0].mnemonic in ("adr", "adrp"))
+        if insns[0].mnemonic == "adr":
+            self.assertEqual(insns[0].operands[-1].imm, new_addr + 4)
+
     def test_auto_patch_arm64_inline(self):
         import lief
         raw = self.patch([{
