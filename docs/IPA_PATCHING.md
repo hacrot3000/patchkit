@@ -24,9 +24,10 @@ and its Python 2 dependencies are unchanged.
   captured before rewriting and preserved when nested bundles are signed.
 
 **Not supported:** arbitrary reflow/resizing of existing __TEXT instructions,
-relocating arbitrary PC-relative stolen instructions (ADR/ADRP in mapped
-sections are supported), branch islands for code beyond
-+/-128MiB, FAT/universal or arm64e automatic hooks, pointer authentication and
+relocating arbitrary PC-relative stolen instructions (ADR/ADRP and in-range
+LDR/LDRSW literal references in mapped sections are supported), automatic
+branch islands for 4-byte hook sites beyond +/-128MiB, FAT/universal or
+arm64e automatic hooks, pointer authentication and
 BTI handling, Swift symbol resolution, FairPlay decryption, App Store IPA DRM,
 on-device hotpatching or bypassing signing rules. Thin arm64 segment growth is
 implemented, but still requires device-level testing for production readiness.
@@ -217,21 +218,26 @@ instruction(s), use:
 In `before` mode, the generated detour runs your injected instructions,
 replays the original complete instructions that were replaced, and branches
 back to the next original address. This is only supported when those original
-instructions are position-independent **or** are supported ADR/ADRP references
-whose destination can be remapped into an existing Mach-O section. Unconditional
-and conditional branches, literal loads, BTI, PAC/AUT and other unimplemented
-PC-relative instructions remain refused. ADR/ADRP may expand from one to two
-instructions in the trampoline when necessary. The manifest author is
+instructions are position-independent **or** are supported ADR/ADRP/LDR literal
+references whose destination can be remapped into an existing Mach-O section.
+LDR/LDRSW literal loads must remain within +/-1MiB of their remapped target;
+other literal/conditional branches, BTI, PAC/AUT and unimplemented PC-relative
+instructions remain refused. ADR may expand from one to two instructions in
+the trampoline when necessary. The manifest author is
 responsible for ABI correctness: custom assembly must preserve any register,
 flags, link register, and stack state used by the interrupted function. In
 `replace` mode, the hook branches to the named injected function instead of
 executing the original. Injected replacement functions must implement the
 appropriate ABI and return/branch behavior themselves.
 
-Detours use the ARM64 `B` instruction (4-byte overwrite with optional NOP
-padding), which works only within **+/-128 MiB**. If the allocated segment is
-farther away, the tool refuses the hook; it does not silently clobber x16 or
-make an unsafe long-range branch. The CLI reports the new segment base,
+Detours prefer the register-free ARM64 `B` instruction (4-byte overwrite)
+within **+/-128 MiB**. For farther destinations, an explicit opt-in can use
+`ADRP x16 + ADD x16 + BR x16` (12-byte overwrite), provided that the original
+code region supplies at least 12 verified bytes and ADRP's +/-4GiB reach
+is sufficient. This variant intentionally clobbers scratch register x16, so
+it can change program behavior if the intercepted function depends on x16.
+Never enable it without auditing the interrupted ABI/register state.
+The CLI reports the new segment base,
 symbol addresses, capacity, and the number of hooks applied. These addresses
 are unslid Mach-O VM addresses (not runtime ASLR addresses).
 
@@ -245,8 +251,9 @@ device before treating an output as distributable.
 
 The test workflow runs fast synthetic IPA checks on Linux and macOS.
 On macOS it also builds a minimal arm64 Mach-O executable, inserts an RX
-segment, injects code and verifies detour/trampoline layout. These tests do
-not execute the patched ARM64 binary or install a patched IPA on iPhone.
+segment, injects code and **executes** patched binaries, including long-range
+opt-in branches and PC-relative LDR literal relocation. Tests do not install
+the patched IPA on iPhone.
 
 
 ## Automatic patch expansion
@@ -282,8 +289,10 @@ their previously encoded entitlements.
 
 ## Structural verification and actual execution
 
-The code-expansion pipeline also checks that critical load commands remain
-present, LINKEDIT tables fall within the output file, file-backed segments do
+After writing the IPA, PatchKit reads every generated ZIP entry again,
+checks member identity, original vs packed SHA-256 and symlink targets before
+atomically replacing the output path. The code-expansion pipeline also checks
+that critical load commands remain present, LINKEDIT tables fall within the output file, file-backed segments do
 not overlap, and LC_MAIN points to an executable segment. This guards against
 some LIEF relayout failures; it does not prove that dyld chained-fixup payloads
 and pointer relocations remain semantically correct.
@@ -296,3 +305,31 @@ or signing with a real provisioning profile.
 
 Use only IPA files you own or are authorized to modify. The patcher does not
 remove FairPlay encryption or bypass iOS code-signing requirements.
+
+
+### Explicit long-range branch mode
+
+A hook or `auto_patch_arm64` instruction can declare `"long_branch": "x16"`:
+
+```json
+{
+  "type": "hook_arm64",
+  "mode": "replace",
+  "address": "0x100003000",
+  "expected_hex": "1f2003d5000080d2c0035fd6",
+  "symbol": "replacement",
+  "long_branch": "x16"
+}
+```
+
+If a direct B is within reach, the tool still uses B and NOP-pads the
+verified overwritten region. If B is out of reach, it uses ADRP/ADD/BR x16,
+which computes the destination relative to the executable's current PC page
+and remains valid under ASLR. The tool never embeds an unslid absolute
+function pointer. If the verified original region is under 12 bytes or the
+target exceeds ADRP's signed page range, patching fails without an output.
+
+This is an advanced opt-in specifically because clobbering x16 may invalidate
+the code's expected register state. In `before` mode the same opt-in applies
+to both detour and trampoline return. Be especially cautious with compiler
+generated stubs and pointer-authenticated iOS call sequences.
