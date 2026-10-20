@@ -8,6 +8,7 @@ import importlib.util
 import json
 import plistlib
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -37,18 +38,19 @@ class IOSBuildValidation(unittest.TestCase):
             source = root / "probe.s"
             thin = root / "Probe"
             source.write_text(
-                ".globl _probe\n.p2align 2\n_probe:\n nop\n mov x0, #0\n ret\n"
+                ".globl _main\n.p2align 2\n_main:\n nop\n mov x0, #0\n ret\n"
             )
             build = subprocess.run(
                 ["xcrun", "--sdk", "iphoneos", "clang", "-arch", "arm64",
-                 "-miphoneos-version-min=15.0", "-dynamiclib",
-                 "-Wl,-install_name,@rpath/Probe.dylib",
+                 "-miphoneos-version-min=15.0", "-Wl,-e,_main",
                  "-o", str(thin), str(source)],
                 text=True, capture_output=True
             )
             if build.returncode:
                 self.fail("Cannot build iOS/arm64 fixture: " + build.stderr)
             original = thin.read_bytes()
+            # Filetype 2 is MH_EXECUTE, unlike the earlier dylib-based fixture.
+            self.assertEqual(struct.unpack_from("<I", original, 12)[0], 2)
             original_binary = lief.MachO.parse(str(thin)).at(0)
             address = int(original_binary.get_section("__text").virtual_address)
             before_versions = [
@@ -81,6 +83,7 @@ class IOSBuildValidation(unittest.TestCase):
             with zipfile.ZipFile(output) as archive:
                 modified = archive.read("Payload/Probe.app/Probe")
             self.assertIsNotNone(lief.MachO.parse(modified).at(0).get_segment("__PKTEXT"))
+            self.assertEqual(struct.unpack_from("<I", modified, 12)[0], 2)
             validate_macho_integrity(original, modified)
             after_versions = [
                 bytes(body) for code, body in _load_commands(modified)
