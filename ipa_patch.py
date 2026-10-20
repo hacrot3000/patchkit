@@ -145,8 +145,8 @@ def arm64_slice(data, flavor="arm64"):
             raise IPAError("Truncated Mach-O header")
         cpu, subtype = struct.unpack_from("<ii", data, 4)
         candidates.append((cpu, subtype, 0, len(data)))
-    elif data[:4] in FAT_MAGICS:
-        endian, fat64 = FAT_MAGICS[data[:4]]
+    elif bytes(data[:4]) in FAT_MAGICS:
+        endian, fat64 = FAT_MAGICS[bytes(data[:4])]
         if len(data) < 8:
             raise IPAError("Truncated FAT header")
         count = struct.unpack_from(endian + "I", data, 4)[0]
@@ -244,9 +244,17 @@ def patch_operation(app, executable, operation, manifest_dir):
         if len(old) != len(new):
             raise IPAError("replace_bytes must preserve byte length")
         expected = number(operation.get("occurrences", 1))
-        if expected < 1 or data.count(old) != expected:
+        # When editing Mach-O, restrict searches to the selected architecture.
+        # Otherwise a FAT binary might accidentally patch another slice.
+        if bytes(data[:4]) == MACHO_64_LE or bytes(data[:4]) in FAT_MAGICS:
+            selected = arm64_slice(data, operation.get("arch", "arm64"))
+            start, end = selected.offset, selected.offset + selected.size
+        else:
+            start, end = 0, len(data)
+        region = bytes(data[start:end])
+        if expected < 1 or region.count(old) != expected:
             raise IPAError("replace_bytes occurrence count mismatch in %s" % path)
-        data = data.replace(old, new)
+        data[start:end] = region.replace(old, new)
     elif kind in ("patch_offset", "patch_address", "arm64_asm"):
         flavor = operation.get("arch", "arm64")
         selected = arm64_slice(data, flavor)
