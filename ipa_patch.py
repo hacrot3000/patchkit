@@ -465,15 +465,15 @@ def apply(ipa, manifest, output, *, allow_unsigned=False, sign_identity=None,
         app, executable = app_bundle(root)
         preserved = (snapshot_entitlements(app, Path(temp) / "__preserved_signatures")
                      if sign_identity else {})
-        structural = []
+        structural = {}
         structural_started = False
         for i, operation in enumerate(operations):
             try:
                 if not isinstance(operation, dict):
                     raise IPAError("Every operation must be a JSON object")
                 if operation.get("type") == "auto_patch_arm64":
-                    if operation.get("target", "executable") != "executable":
-                        raise IPAError("auto_patch_arm64 supports main executable only")
+                    target = operation.get("target", "executable")
+                    target_file(app, executable, target)
                     if operation.get("arch", "arm64") != "arm64":
                         raise IPAError("auto_patch_arm64 currently requires arm64")
                     address = number(operation.get("address"))
@@ -500,25 +500,28 @@ def apply(ipa, manifest, output, *, allow_unsigned=False, sign_identity=None,
                             raise IPAError("Inline auto patches must precede structural operations")
                         payload += bytes.fromhex("1f2003d5") * ((len(original) - len(payload)) // 4)
                         patch_operation(app, executable, {
-                            "type": "patch_address", "target": "executable",
+                            "type": "patch_address", "target": target,
                             "arch": "arm64", "address": address,
                             "expected_hex": original.hex(), "new_hex": payload.hex()
                         }, manifest.parent)
                     else:
                         structural_started = True
                         generated = "__patchkit_auto_%d" % i
-                        structural.append({
-                            "type": "inject_arm64", "name": generated, "asm": script
+                        structural.setdefault(target, []).append({
+                            "type": "inject_arm64", "target": target,
+                            "name": generated, "asm": script
                         })
-                        structural.append({
-                            "type": "hook_arm64", "mode": "replace",
-                            "address": address, "expected_hex": original.hex(),
-                            "symbol": generated
+                        structural[target].append({
+                            "type": "hook_arm64", "target": target,
+                            "mode": "replace", "address": address,
+                            "expected_hex": original.hex(), "symbol": generated
                         })
                     continue
                 if operation.get("type") in ("inject_arm64", "hook_arm64", "extend_macho"):
                     structural_started = True
-                    structural.append(operation)
+                    target = operation.get("target", "executable")
+                    target_file(app, executable, target)
+                    structural.setdefault(target, []).append(operation)
                     continue
                 if structural_started:
                     raise IPAError("All Mach-O expansion operations must be last in the manifest")
@@ -527,8 +530,10 @@ def apply(ipa, manifest, output, *, allow_unsigned=False, sign_identity=None,
                 raise IPAError("Operation %d failed: %s" % (i + 1, exc)) from exc
         if structural:
             from ipa_macho_inject import expand_macho
-            details = expand_macho(executable, structural)
-            print("Mach-O expansion: %s" % json.dumps(details, sort_keys=True))
+            for target, operations_for_target in structural.items():
+                selected_binary = target_file(app, executable, target)
+                details = expand_macho(selected_binary, operations_for_target)
+                print("Mach-O expansion %s: %s" % (target, json.dumps(details, sort_keys=True)))
         if sign_identity:
             resign(app, sign_identity, entitlements, profile, preserved)
         repack(root, output)
