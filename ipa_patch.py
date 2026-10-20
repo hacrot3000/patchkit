@@ -406,6 +406,50 @@ def resign(app, identity, entitlements=None, profile=None, original_entitlements
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
 
 
+
+def verify_repacked_archive(root, ipa):
+    """Re-read every output member and compare content with the staged bundle.
+
+    The generated ZIP is checked before atomically replacing the destination.
+    This catches accidental omissions, byte corruption, duplicate members and
+    lost symlink metadata without extracting untrusted paths a second time.
+    """
+    expected = {}
+    for base, dirs, files in os.walk(root, followlinks=False):
+        for name in dirs + files:
+            path = Path(base) / name
+            if path.is_symlink() or path.is_file():
+                expected[path.relative_to(root).as_posix()] = path
+    with zipfile.ZipFile(ipa, "r") as archive:
+        entries = archive.infolist()
+        observed = [i.filename for i in entries]
+        if len(observed) != len(set(observed)) or set(observed) != set(expected):
+            raise IPAError("Repacked IPA member listing differs from staged app")
+        for info in entries:
+            name = info.filename
+            path = expected[name]
+            metadata = info.external_attr >> 16
+            if path.is_symlink():
+                if not stat.S_ISLNK(metadata):
+                    raise IPAError("Repacked IPA symlink metadata lost: %s" % name)
+                if archive.read(info) != os.readlink(path).encode("utf-8"):
+                    raise IPAError("Repacked IPA symlink target changed: %s" % name)
+            else:
+                if stat.S_ISLNK(metadata):
+                    raise IPAError("Repacked IPA unexpected symlink: %s" % name)
+                if info.file_size != path.stat().st_size:
+                    raise IPAError("Repacked IPA file size changed: %s" % name)
+                staged_hash = hashlib.sha256()
+                packed_hash = hashlib.sha256()
+                with path.open("rb") as original, archive.open(info, "r") as packed:
+                    while chunk := original.read(1024 * 1024):
+                        staged_hash.update(chunk)
+                    while chunk := packed.read(1024 * 1024):
+                        packed_hash.update(chunk)
+                if staged_hash.digest() != packed_hash.digest():
+                    raise IPAError("Repacked IPA content mismatch: %s" % name)
+
+
 def repack(root, destination):
     dest = Path(destination)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -425,6 +469,7 @@ def repack(root, destination):
                         output.writestr(entry, os.readlink(path).encode("utf-8"))
                     elif path.is_file():
                         output.write(path, relative)
+        verify_repacked_archive(root, tmp)
         os.replace(tmp, dest)
     finally:
         tmp.unlink(missing_ok=True)
