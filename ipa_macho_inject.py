@@ -131,14 +131,52 @@ def _validate_relocatable_stolen(disassembler, constants, original, address):
     if len(instructions) != len(original) // 4:
         raise IPAError("Cannot decode all overwritten ARM64 instructions")
     for instruction in instructions:
-        if instruction.mnemonic.lower() in ("adr", "adrp"):
+        name = instruction.mnemonic.lower()
+        if name in ("adr", "adrp"):
             if (len(instruction.operands) < 2 or
                     instruction.operands[-1].type != constants.ARM64_OP_IMM or
                     not instruction.op_str.split(",")[0].strip().startswith("x")):
                 raise IPAError("Unsupported ADR/ADRP operands")
+        elif (name in ("ldr", "ldrsw") and instruction.operands and
+              instruction.operands[-1].type == constants.ARM64_OP_IMM):
+            # Only ARM64 literal loads (imm19), not register-based loads.
+            word, = struct.unpack("<I", instruction.bytes)
+            if word & 0x3B000000 != 0x18000000:
+                raise IPAError("Unsupported PC-relative load encoding")
         else:
             _copyable_stolen(disassembler, constants, instruction.bytes,
                              instruction.address)
+
+
+def _remap_section_address(destination, sections, rebuilt_binary):
+    original_section = next((
+        (segment_name, section_name, old_address)
+        for segment_name, section_name, old_address, old_size in sections
+        if old_address <= destination < old_address + old_size
+    ), None)
+    if original_section is None:
+        raise IPAError("Cannot remap PC-relative address 0x%x outside known sections" %
+                       destination)
+    segment_name, section_name, old_start = original_section
+    new_section = rebuilt_binary.get_section(segment_name, section_name)
+    if new_section is None:
+        raise IPAError("PC-relative destination section missing after rebuild")
+    return int(new_section.virtual_address) + destination - old_start
+
+
+def _encode_literal_load(original_instruction, old_target, new_pc,
+                         sections, rebuilt_binary):
+    if len(original_instruction) != 4:
+        raise IPAError("ARM64 literal load must occupy 4 bytes")
+    encoded, = struct.unpack("<I", original_instruction)
+    if encoded & 0x3B000000 != 0x18000000:
+        raise IPAError("Unsupported LDR literal encoding")
+    target = _remap_section_address(old_target, sections, rebuilt_binary)
+    delta = target - new_pc
+    if delta % 4 or not -(1 << 20) <= delta < (1 << 20):
+        raise IPAError("LDR literal target beyond +/-1MiB reach after relocation")
+    return struct.pack("<I",
+                       (encoded & ~0x00FFFFE0) | (((delta // 4) & 0x7FFFF) << 5))
 
 
 def _relocate_stolen(disassembler, constants, assembler, original, address,
@@ -153,26 +191,21 @@ def _relocate_stolen(disassembler, constants, assembler, original, address,
     relocated = bytearray()
     for instruction in disassembler.disasm(original, address):
         mnemonic = instruction.mnemonic.lower()
+        if (mnemonic in ("ldr", "ldrsw") and instruction.operands and
+                instruction.operands[-1].type == constants.ARM64_OP_IMM):
+            relocated.extend(_encode_literal_load(
+                instruction.bytes, int(instruction.operands[-1].imm),
+                trampoline_address + len(relocated),
+                original_sections_snapshot, rebuilt_binary
+            ))
+            continue
         if mnemonic not in ("adr", "adrp"):
             relocated.extend(instruction.bytes)
             continue
         destination = int(instruction.operands[-1].imm)
-        # LIEF mutates the original Binary object when adding a segment.
-        # Use a frozen pre-mutation section table, never binary.sections here.
-        original_section = next((
-            (segment_name, section_name, old_address)
-            for segment_name, section_name, old_address, old_size
-            in original_sections_snapshot
-            if old_address <= destination < old_address + old_size
-        ), None)
-        if original_section is None:
-            raise IPAError("Cannot remap ADR/ADRP target 0x%x (source PC 0x%x)" %
-                           (destination, instruction.address))
-        segment_name, section_name, old_section_start = original_section
-        new_section = rebuilt_binary.get_section(segment_name, section_name)
-        if new_section is None:
-            raise IPAError("ADR/ADRP destination section missing after rebuild")
-        destination = int(new_section.virtual_address) + destination - old_section_start
+        destination = _remap_section_address(
+            destination, original_sections_snapshot, rebuilt_binary
+        )
         register = instruction.op_str.split(",")[0].strip()
         if not register.startswith("x") or not register[1:].isdigit():
             raise IPAError("ADR/ADRP destination must be x0..x30")
