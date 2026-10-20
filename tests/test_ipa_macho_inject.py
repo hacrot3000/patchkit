@@ -241,6 +241,25 @@ class MachOIntegration(unittest.TestCase):
         self.assertEqual(read_entitlements(finished / "PlugIns" / "Widget.appex"),
                          {"get-task-allow": False})
 
+    def test_execute_patched_arm64_program(self):
+        # Unlike structure-only tests, this exercises dyld and the detour.
+        raw = self.patch([
+            {"type": "inject_arm64", "name": "new_main",
+             "asm": "mov x0, #7; ret"},
+            {"type": "hook_arm64", "mode": "replace",
+             "address": hex(self.address), "expected_hex": "1f2003d5",
+             "symbol": "new_main"},
+        ])
+        executable = self.root / (self._testMethodName + "-program")
+        executable.write_bytes(raw)
+        executable.chmod(0o755)
+        subprocess.run(["codesign", "--force", "--sign", "-",
+                        "--timestamp=none", str(executable)],
+                       capture_output=True, check=True)
+        proc = subprocess.run([str(executable)], capture_output=True, timeout=10)
+        self.assertEqual(proc.returncode, 7,
+                         "Mach-O did not execute injected code: %r" % proc.stderr)
+
     def test_auto_patch_arm64_inline(self):
         import lief
         raw = self.patch([{
