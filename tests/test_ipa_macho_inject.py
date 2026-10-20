@@ -261,16 +261,14 @@ class MachOIntegration(unittest.TestCase):
                          "Mach-O did not execute injected code: %r" % proc.stderr)
 
     def test_before_hook_relocates_adr_target_after_relayout(self):
-        from keystone import Ks, KS_ARCH_ARM64, KS_MODE_LITTLE_ENDIAN
         import lief
-        encoder = Ks(KS_ARCH_ARM64, KS_MODE_LITTLE_ENDIAN)
-        original = "adr x0, #0x%x" % (self.address + 4)
-        encoded, _ = encoder.asm(original, addr=self.address)
+        from ipa_macho_inject import _encode_pc_relative
+        encoded = _encode_pc_relative(0, self.address + 4, self.address)
         raw = self.patch([
-            {"type": "arm64_asm", "address": hex(self.address),
-             "expected_hex": "1f2003d5", "asm": original},
+            {"type": "patch_address", "address": hex(self.address),
+             "expected_hex": "1f2003d5", "new_hex": encoded.hex()},
             {"type": "hook_arm64", "mode": "before",
-             "address": hex(self.address), "expected_hex": bytes(encoded).hex(),
+             "address": hex(self.address), "expected_hex": encoded.hex(),
              "asm": "nop"},
         ])
         image = lief.MachO.parse(raw).at(0)
