@@ -126,6 +126,21 @@ class IPATests(unittest.TestCase):
         with self.assertRaisesRegex(IPAError, "outside selected"):
             self.run_patch()
 
+    def test_dry_run_validates_without_writing_output(self):
+        self.write_manifest({"type": "patch_address", "address": hex(VMADDR + 0x100),
+                             "expected_hex": OLD.hex(), "new_hex": NEW.hex()})
+        initial = self.source.read_bytes()
+        apply(self.source, self.manifest, dry_run=True)
+        self.assertFalse(self.out.exists())
+        self.assertEqual(self.source.read_bytes(), initial)
+
+    def test_dry_run_rejects_bad_expected_bytes(self):
+        self.write_manifest({"type": "patch_address", "address": hex(VMADDR + 0x100),
+                             "expected_hex": "ffffffff", "new_hex": NEW.hex()})
+        with self.assertRaisesRegex(IPAError, "Expected original bytes"):
+            apply(self.source, self.manifest, dry_run=True)
+        self.assertFalse(self.out.exists())
+
     def test_signing_is_explicit(self):
         self.write_manifest({"type": "replace_file", "target": "note.txt", "source": "new.txt"})
         with self.assertRaisesRegex(IPAError, "sign-identity"):
