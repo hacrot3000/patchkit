@@ -316,7 +316,9 @@ def _verify_hook(source, hook, disassembler, constants):
             raise IPAError("before hook requires asm")
     elif not isinstance(hook.get("symbol"), str):
         raise IPAError("replace hook requires an injected symbol")
-    # Prevent accidental hook of data or non-executable ranges.
+    # Segment-wide RX is insufficient: __TEXT can also contain C strings,
+    # const data and unwind tables. Only hook a section explicitly marked as
+    # containing ARM64 instructions (S_ATTR_PURE_INSTRUCTIONS / SOME_INSTRUCTIONS).
     _, _, _, _, count, cmd_size, _, _ = struct.unpack_from("<IiiIIIII", source, 0)
     cursor = 32
     executable = False
@@ -327,14 +329,33 @@ def _verify_hook(source, hook, disassembler, constants):
         if size < 8 or cursor + size > 32 + cmd_size:
             raise IPAError("Malformed Mach-O load commands")
         if cmd == 0x19:
+            if size < 72:
+                raise IPAError("Truncated LC_SEGMENT_64")
             values = struct.unpack_from("<II16sQQQQiiII", source, cursor)
-            vmaddr, vmsize, initprot = values[3], values[4], values[8]
+            vmaddr, vmsize, initprot, section_count = (
+                values[3], values[4], values[8], values[9]
+            )
+            if section_count > (size - 72) // 80:
+                raise IPAError("LC_SEGMENT_64 section table exceeds load command")
             if vmaddr <= addr and addr + len(expected) <= vmaddr + vmsize:
-                executable = bool(initprot & 4)
+                if initprot & 4:
+                    for index in range(section_count):
+                        start = cursor + 72 + index * 80
+                        section = struct.unpack_from(
+                            "<16s16sQQIIIIIIII", source, start
+                        )
+                        section_addr, section_size, flags = (
+                            section[2], section[3], section[8]
+                        )
+                        if (section_addr <= addr and
+                                addr + len(expected) <= section_addr + section_size and
+                                flags & (0x80000000 | 0x00000400)):
+                            executable = True
+                            break
                 break
         cursor += size
     if not executable:
-        raise IPAError("Hook address must lie in an executable Mach-O segment")
+        raise IPAError("Hook address must lie in an ARM64 instruction section")
     return addr, expected, mode
 
 
