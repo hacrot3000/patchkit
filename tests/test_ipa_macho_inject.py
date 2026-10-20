@@ -113,31 +113,36 @@ class MachOIntegration(unittest.TestCase):
             self.assertIn(bytes.fromhex("e00080d2"), raw)
 
     def test_hook_before_and_return(self):
+        import lief
         raw = self.patch([
             {"type": "hook_arm64", "address": hex(self.address),
              "expected_hex": "1f2003d5", "asm": "nop"},
         ])
+        # LIEF may relocate the original __text section during Mach-O growth.
+        current = int(lief.MachO.parse(raw).at(0).get_section("__text").virtual_address)
         selected = arm64_slice(raw)
-        at = address_to_offset(raw, selected, self.address)
+        at = address_to_offset(raw, selected, current)
         encoded, = struct.unpack_from("<I", raw, at)
         self.assertEqual(encoded & 0xFC000000, 0x14000000)
         disp = encoded & 0x03FFFFFF
         if disp & (1 << 25):
             disp -= 1 << 26
-        target = self.address + 4 * disp
+        target = current + 4 * disp
         first = address_to_offset(raw, selected, target)
         self.assertEqual(raw[first:first + 8], bytes.fromhex("1f2003d51f2003d5"))
         jump_back, = struct.unpack_from("<I", raw, first + 8)
         self.assertEqual(jump_back & 0xFC000000, 0x14000000)
 
     def test_replace_hook_to_named_function(self):
+        import lief
         raw = self.patch([
             {"type": "inject_arm64", "name": "new_func", "asm": "mov x0, #7; ret"},
             {"type": "hook_arm64", "mode": "replace", "address": hex(self.address),
              "expected_hex": "1f2003d5", "symbol": "new_func"},
         ])
+        current = int(lief.MachO.parse(raw).at(0).get_section("__text").virtual_address)
         selected = arm64_slice(raw)
-        pos = address_to_offset(raw, selected, self.address)
+        pos = address_to_offset(raw, selected, current)
         word, = struct.unpack_from("<I", raw, pos)
         self.assertEqual(word & 0xFC000000, 0x14000000)
 
