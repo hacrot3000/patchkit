@@ -24,9 +24,10 @@ and its Python 2 dependencies are unchanged.
   captured before rewriting and preserved when nested bundles are signed.
 
 **Not supported:** arbitrary reflow/resizing of existing __TEXT instructions,
-relocating arbitrary PC-relative stolen instructions (ADR/ADRP and in-range
-LDR/LDRSW literal references in mapped sections are supported), automatic
-branch islands for 4-byte hook sites beyond +/-128MiB, FAT/universal or
+relocating arbitrary PC-relative stolen instructions (ADR/ADRP, in-range
+LDR/LDRSW literals, and external B/BL/B.cond/CBZ/CBNZ/TBZ/TBNZ branches
+in mapped sections are supported), automatic branch islands for 4-byte hook
+sites beyond +/-128MiB, FAT/universal or
 arm64e automatic hooks, pointer authentication and
 BTI handling, Swift symbol resolution, FairPlay decryption, App Store IPA DRM,
 on-device hotpatching or bypassing signing rules. Thin arm64 segment growth is
@@ -218,12 +219,14 @@ instruction(s), use:
 In `before` mode, the generated detour runs your injected instructions,
 replays the original complete instructions that were replaced, and branches
 back to the next original address. This is only supported when those original
-instructions are position-independent **or** are supported ADR/ADRP/LDR literal
-references whose destination can be remapped into an existing Mach-O section.
-LDR/LDRSW literal loads must remain within +/-1MiB of their remapped target;
-other literal/conditional branches, BTI, PAC/AUT and unimplemented PC-relative
-instructions remain refused. ADR may expand from one to two instructions in
-the trampoline when necessary. The manifest author is
+instructions are position-independent **or** are supported ADR/ADRP, LDR/LDRSW
+literal and external branch references whose destination can be remapped into
+an existing Mach-O section. External B/BL, B.cond, CBZ/CBNZ and TBZ/TBNZ
+retain their original branch condition/register tests, and are re-encoded
+only while their specific immediate remains in range. Branches into stolen
+instructions are refused. LDR/LDRSW literals must remain within +/-1MiB;
+BTI, PAC/AUT and unimplemented PC-relative instructions remain refused.
+ADR may expand from one to two instructions in the trampoline when necessary. The manifest author is
 responsible for ABI correctness: custom assembly must preserve any register,
 flags, link register, and stack state used by the interrupted function. In
 `replace` mode, the hook branches to the named injected function instead of
@@ -252,7 +255,8 @@ device before treating an output as distributable.
 The test workflow runs fast synthetic IPA checks on Linux and macOS.
 On macOS it also builds a minimal arm64 Mach-O executable, inserts an RX
 segment, injects code and **executes** patched binaries, including long-range
-opt-in branches and PC-relative LDR literal relocation. Tests do not install
+opt-in branches, PC-relative LDR literal relocation, and external conditional
+branches (B.cond, CBZ/CBNZ, TBZ/TBNZ). Tests do not install
 the patched IPA on iPhone.
 
 
@@ -291,7 +295,9 @@ their previously encoded entitlements.
 
 After writing the IPA, PatchKit reads every generated ZIP entry again,
 checks member identity, original vs packed SHA-256 and symlink targets before
-atomically replacing the output path. The code-expansion pipeline also checks
+atomically replacing the output path. Hooks must target Mach-O sections marked S_ATTR_PURE_INSTRUCTIONS or
+S_ATTR_SOME_INSTRUCTIONS, not data or strings inside a segment with RX
+protection. The code-expansion pipeline also checks
 that critical load commands remain present, LINKEDIT tables fall within the output file, file-backed segments do
 not overlap, and LC_MAIN points to an executable segment. This guards against
 some LIEF relayout failures; it does not prove that dyld chained-fixup payloads
