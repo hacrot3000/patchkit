@@ -128,6 +128,99 @@ def _verify_hook(source, hook, disassembler, constants):
     return addr, expected, mode
 
 
+
+def _load_commands(data):
+    """Read raw Mach-O load commands for post-rebuild integrity checks."""
+    if len(data) < 32:
+        raise IPAError("Truncated Mach-O header")
+    magic, _, _, _, ncmds, sizeofcmds, _, _ = struct.unpack_from(
+        "<IiiIIIII", data, 0
+    )
+    if magic != 0xFEEDFACF or ncmds > 4096 or 32 + sizeofcmds > len(data):
+        raise IPAError("Invalid Mach-O header/load command table")
+    commands = []
+    cursor, end = 32, 32 + sizeofcmds
+    for _ in range(ncmds):
+        if cursor + 8 > end:
+            raise IPAError("Truncated Mach-O load command")
+        kind, size = struct.unpack_from("<II", data, cursor)
+        if size < 8 or cursor + size > end or size % 8:
+            raise IPAError("Malformed or unaligned Mach-O load command")
+        commands.append((kind, data[cursor:cursor + size]))
+        cursor += size
+    if cursor != end:
+        raise IPAError("Mach-O load command size mismatch")
+    return commands
+
+
+def validate_macho_integrity(original, rebuilt):
+    """Verify critical load commands and LINKEDIT extents survived LIEF layout.
+
+    This is a fail-closed structural check, NOT a proof of dyld compatibility.
+    Real device testing is still necessary.
+    """
+    before, after = _load_commands(original), _load_commands(rebuilt)
+    # dyld linking metadata, entrypoint, chained fixups and symbol indexes must
+    # not silently disappear while inserting a new LC_SEGMENT_64.
+    critical = {
+        0x80000028,  # LC_MAIN
+        0x22, 0x80000022,  # LC_DYLD_INFO and LC_DYLD_INFO_ONLY
+        0x80000033, 0x80000034,  # EXPORTS_TRIE, CHAINED_FIXUPS
+        0x26, 0x29,  # FUNCTION_STARTS, DATA_IN_CODE
+        0x2, 0xB,  # SYMTAB, DYSYMTAB
+        0xC, 0x18, 0x1F, 0x20,  # load family of dylibs
+        0x8000001C,  # LC_RPATH
+    }
+    for kind in critical:
+        old_count = sum(cmd == kind for cmd, _ in before)
+        new_count = sum(cmd == kind for cmd, _ in after)
+        if old_count != new_count:
+            raise IPAError("Critical Mach-O command changed (0x%x): %d -> %d" %
+                           (kind, old_count, new_count))
+    file_size = len(rebuilt)
+    # Most LINKEDIT data commands use uint32 dataoff/datasize at +8/+12.
+    linkedit_data = {0x1D, 0x1E, 0x26, 0x29, 0x2B, 0x2E,
+                     0x80000033, 0x80000034}
+    segments = []
+    main = []
+    for cmd, raw in after:
+        if cmd in linkedit_data:
+            if len(raw) < 16:
+                raise IPAError("Truncated LINKEDIT data command")
+            offset, size = struct.unpack_from("<II", raw, 8)
+            if size and (offset > file_size or size > file_size - offset):
+                raise IPAError("LINKEDIT data command outside Mach-O file")
+        elif cmd == 0x19:
+            if len(raw) < 72:
+                raise IPAError("Truncated LC_SEGMENT_64")
+            _, _, _, vmaddr, vmsize, fileoff, filesize, _, initprot, _, _ = (
+                struct.unpack_from("<II16sQQQQiiII", raw, 0)
+            )
+            if fileoff > file_size or filesize > file_size - fileoff:
+                raise IPAError("Mach-O segment outside rebuilt file")
+            segments.append((vmaddr, vmsize, fileoff, filesize, initprot))
+        elif cmd == 0x80000028:
+            if len(raw) < 24:
+                raise IPAError("Truncated LC_MAIN")
+            main.append(struct.unpack_from("<Q", raw, 8)[0])
+        elif cmd == 0x2:
+            if len(raw) < 24:
+                raise IPAError("Truncated LC_SYMTAB")
+            symoff, nsyms, stroff, strsize = struct.unpack_from("<IIII", raw, 8)
+            if (symoff > file_size or nsyms * 16 > file_size - symoff
+                    or stroff > file_size or strsize > file_size - stroff):
+                raise IPAError("Mach-O symbol/string table outside file")
+    ranges = sorted((start, start + size) for _, _, start, size, _ in segments if size)
+    for previous, following in zip(ranges, ranges[1:]):
+        if previous[1] > following[0]:
+            raise IPAError("Overlapping Mach-O file-backed segments")
+    for entryoff in main:
+        if not any(fileoff <= entryoff < fileoff + filesize and prot & 4
+                   for _, _, fileoff, filesize, prot in segments):
+            raise IPAError("LC_MAIN entry point is not in executable file-backed segment")
+    return {"segments": len(segments), "linkedit_checked": True,
+            "main_entrypoints": len(main)}
+
 def _parse_lief(lief, path):
     fat = lief.MachO.parse(str(path))
     if fat is None or fat.size != 1:
@@ -224,6 +317,7 @@ def expand_macho(path, operations, report=None):
         intermediate = Path(temp) / "expanded"
         fat.write(str(intermediate))
         raw = bytearray(intermediate.read_bytes())
+        validate_macho_integrity(data, raw)
         selected = arm64_slice(raw)
         rebuilt = lief.MachO.parse(str(intermediate))
         if rebuilt is None or rebuilt.size != 1:
@@ -286,6 +380,7 @@ def expand_macho(path, operations, report=None):
                 raise IPAError("Overlapping hook sites")
             occupied |= touched
             raw[pos:pos + len(previous)] = patched
+        validate_macho_integrity(data, raw)
         intermediate.write_bytes(raw)
         # Reparse to catch invalid load commands and validate new binary structure.
         checked = lief.MachO.parse(str(intermediate))
