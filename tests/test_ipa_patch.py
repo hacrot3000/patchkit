@@ -1,3 +1,4 @@
+import hashlib
 import json
 import plistlib
 import stat
@@ -146,6 +147,35 @@ class IPATests(unittest.TestCase):
         self.write_manifest({"type": "replace_bytes", "target": "../Info.plist",
                              "old_hex": "0102", "new_hex": "0304"})
         with self.assertRaisesRegex(IPAError, "Unsafe ZIP entry"):
+            self.run_patch()
+
+    def test_input_sha256_guard(self):
+        self.manifest.write_text(json.dumps({
+            "input_sha256": "0" * 64,
+            "operations": [{"type": "patch_offset", "offset": 0x100,
+                            "expected_hex": OLD.hex(), "new_hex": NEW.hex()}]
+        }))
+        with self.assertRaisesRegex(IPAError, "SHA256 does not match"):
+            self.run_patch()
+        self.assertFalse(self.out.exists())
+        correct = hashlib.sha256(self.source.read_bytes()).hexdigest()
+        self.manifest.write_text(json.dumps({
+            "input_sha256": correct,
+            "operations": [{"type": "patch_offset", "offset": 0x100,
+                            "expected_hex": OLD.hex(), "new_hex": NEW.hex()}]
+        }))
+        self.run_patch()
+        self.assertEqual(entry(self.out, "Sample")[0x100:0x104], NEW)
+
+    def test_fairplay_encrypted_macho_rejected(self):
+        binary = bytearray(thin_macho())
+        struct.pack_into("<I", binary, 16, 2)  # ncmds
+        struct.pack_into("<I", binary, 20, 96)  # sizeofcmds
+        struct.pack_into("<IIIIII", binary, 104, 0x2C, 24, 0x100, 4, 1, 0)
+        make_ipa(self.source, bytes(binary))
+        self.write_manifest({"type": "patch_offset", "offset": 0x100,
+                             "expected_hex": OLD.hex(), "new_hex": NEW.hex()})
+        with self.assertRaisesRegex(IPAError, "Encrypted Mach-O"):
             self.run_patch()
 
     def test_large_unpacked_ipa_rejected(self):
