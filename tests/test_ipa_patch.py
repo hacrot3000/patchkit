@@ -141,6 +141,39 @@ class IPATests(unittest.TestCase):
             apply(self.source, self.manifest, dry_run=True)
         self.assertFalse(self.out.exists())
 
+    def test_repacked_archive_verifies_original_files(self):
+        from ipa_patch import verify_repacked_archive
+        self.write_manifest({"type": "replace_bytes", "target": "note.txt",
+                             "old_hex": b"Original".hex(),
+                             "new_hex": b"Replaced".hex()})
+        self.run_patch()
+        with tempfile.TemporaryDirectory() as folder:
+            from ipa_patch import extract_ipa
+            root = Path(folder)
+            extract_ipa(self.out, root, 1024 * 1024)
+            verify_repacked_archive(root, self.out)
+            # A tampered file in the output archive must be detected rather
+            # than silently accepted by an independent verification step.
+            (root / "Payload/Sample.app/note.txt").write_bytes(b"Unexpected!")
+            with self.assertRaisesRegex(IPAError, "content mismatch|size changed"):
+                verify_repacked_archive(root, self.out)
+
+    def test_repack_preserves_internal_symlinks(self):
+        from ipa_patch import extract_ipa, verify_repacked_archive
+        link = zipfile.ZipInfo("Payload/Sample.app/note-alias.txt")
+        link.create_system = 3
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        with zipfile.ZipFile(self.source, "a") as archive:
+            archive.writestr(link, "note.txt")
+        self.write_manifest({"type": "patch_offset", "offset": 0x100,
+                             "expected_hex": OLD.hex(), "new_hex": NEW.hex()})
+        self.run_patch()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            extract_ipa(self.out, root, 1024 * 1024)
+            self.assertTrue((root / "Payload/Sample.app/note-alias.txt").is_symlink())
+            verify_repacked_archive(root, self.out)
+
     def test_signing_is_explicit(self):
         self.write_manifest({"type": "replace_file", "target": "note.txt", "source": "new.txt"})
         with self.assertRaisesRegex(IPAError, "sign-identity"):
