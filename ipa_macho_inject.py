@@ -328,9 +328,10 @@ def _require_ops(operations):
     size = 0
     symbols = set()
     hooks = []
+    expected_target = operations[0].get("target", "executable")
     for item in operations:
-        if item.get("target", "executable") != "executable":
-            raise IPAError("Mach-O expansion supports the main executable only")
+        if item.get("target", "executable") != expected_target:
+            raise IPAError("Mach-O expansion operations must target one executable")
         kind = item.get("type")
         if item.get("arch", "arm64") != "arm64":
             raise IPAError("Automatic injection and hooking refuse arm64e")
