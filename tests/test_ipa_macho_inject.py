@@ -174,6 +174,73 @@ class MachOIntegration(unittest.TestCase):
             apply(self.ipa, self.manifest, self.out, allow_unsigned=True)
         self.assertFalse(self.out.exists())
 
+    def test_hook_rejects_non_instruction_lengths(self):
+        import json
+        for width in (1, 2, 3, 5, 6, 7):
+            with self.subTest(width=width):
+                self.manifest.write_text(json.dumps({"operations": [{
+                    "type": "hook_arm64", "mode": "replace",
+                    "address": hex(self.address), "symbol": "new_func",
+                    "expected_hex": "1f" * width
+                }, {
+                    "type": "inject_arm64", "name": "new_func", "asm": "ret"
+                }]}))
+                with self.assertRaisesRegex(IPAError, "whole 4-byte"):
+                    apply(self.ipa, self.manifest, self.out, allow_unsigned=True)
+                self.assertFalse(self.out.exists())
+
+    def test_preserve_nested_bundle_entitlements(self):
+        from ipa_patch import snapshot_entitlements
+        import json
+        bundle = self.root / "Nested.app"
+        nested = bundle / "PlugIns" / "Widget.appex"
+        nested.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self.binary, bundle / "test_arm64")
+        shutil.copy2(self.binary, nested / "widget")
+        (bundle / "Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleExecutable": "test_arm64",
+            "CFBundleIdentifier": "patchkit.test.nested",
+            "CFBundlePackageType": "APPL"
+        }))
+        (nested / "Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleExecutable": "widget",
+            "CFBundleIdentifier": "patchkit.test.nested.widget",
+            "CFBundlePackageType": "XPC!"
+        }))
+        ent_root = self.root / "root-ent.plist"
+        ent_nested = self.root / "widget-ent.plist"
+        ent_root.write_bytes(plistlib.dumps({"get-task-allow": True}))
+        ent_nested.write_bytes(plistlib.dumps({"get-task-allow": False}))
+        for target, entitlement in [(nested, ent_nested), (bundle, ent_root)]:
+            subprocess.run(["codesign", "--force", "--sign", "-",
+                            "--entitlements", str(entitlement), str(target)],
+                           check=True, capture_output=True)
+        import zipfile
+        with zipfile.ZipFile(self.ipa, "w") as archive:
+            for p in sorted(bundle.rglob("*")):
+                if p.is_file():
+                    archive.write(p, "Payload/Nested.app/" + p.relative_to(bundle).as_posix())
+        self.manifest.write_text(json.dumps({"operations": [{
+            "type": "replace_bytes", "target": "executable",
+            "old_hex": "1f2003d5", "new_hex": "c0035fd6",
+            "occurrences": 1
+        }]}))
+        apply(self.ipa, self.manifest, self.out, sign_identity="-")
+        extracted = self.root / "rechecked"
+        extracted.mkdir()
+        with zipfile.ZipFile(self.out) as archive:
+            archive.extractall(extracted)
+        finished = extracted / "Payload" / "Nested.app"
+        subprocess.run(["codesign", "--verify", "--deep", "--strict", str(finished)],
+                       check=True, capture_output=True)
+        def read_entitlements(path):
+            output = subprocess.run(["codesign", "-d", "--entitlements", ":-", str(path)],
+                                    capture_output=True, check=True)
+            return plistlib.loads(output.stdout)
+        self.assertEqual(read_entitlements(finished), {"get-task-allow": True})
+        self.assertEqual(read_entitlements(finished / "PlugIns" / "Widget.appex"),
+                         {"get-task-allow": False})
+
     def test_injection_rejects_arm64e(self):
         import json
         self.manifest.write_text(json.dumps({"operations": [{
