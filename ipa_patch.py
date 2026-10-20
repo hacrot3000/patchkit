@@ -373,7 +373,8 @@ def snapshot_entitlements(app, destination):
     return saved
 
 
-def resign(app, identity, entitlements=None, profile=None, original_entitlements=None):
+def resign(app, identity, entitlements=None, profile=None, original_entitlements=None,
+           require_profiles=False):
     if sys.platform != "darwin" or not shutil.which("codesign"):
         raise IPAError("Signing requires macOS and codesign")
     if profile:
@@ -403,6 +404,8 @@ def resign(app, identity, entitlements=None, profile=None, original_entitlements
             if actual != expected:
                 raise IPAError("Entitlements changed while signing: %s" % relative)
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
+    from ipa_profiles import check_bundle_profiles
+    return check_bundle_profiles(app, require_all=(require_profiles or bool(profile)))
 
 
 
@@ -475,7 +478,8 @@ def repack(root, destination):
 
 
 def apply(ipa, manifest, output=None, *, allow_unsigned=False, sign_identity=None,
-          entitlements=None, profile=None, max_unpacked_mib=2048, dry_run=False):
+          entitlements=None, profile=None, max_unpacked_mib=2048, dry_run=False,
+          require_profiles=False):
     ipa, manifest = Path(ipa).resolve(), Path(manifest).resolve()
     output = Path(output).resolve() if output is not None else None
     if output is not None and ipa == output:
@@ -488,6 +492,8 @@ def apply(ipa, manifest, output=None, *, allow_unsigned=False, sign_identity=Non
         raise IPAError("--entitlements requires --sign-identity")
     if profile and not sign_identity:
         raise IPAError("--profile requires --sign-identity")
+    if require_profiles and not sign_identity:
+        raise IPAError("--require-profiles requires --sign-identity")
     try:
         spec = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -587,7 +593,10 @@ def apply(ipa, manifest, output=None, *, allow_unsigned=False, sign_identity=Non
                   "no IPA output written and no signing attempted.")
             return
         if sign_identity:
-            resign(app, sign_identity, entitlements, profile, preserved)
+            profiles = resign(app, sign_identity, entitlements, profile, preserved,
+                              require_profiles=require_profiles)
+            print("Verified %d provisioning profile(s) against signed entitlements." %
+                  len(profiles))
         repack(root, output)
     if not sign_identity:
         print("WARNING: output IPA is NOT re-signed and cannot be installed as-is.", file=sys.stderr)
@@ -607,6 +616,8 @@ def main(argv=None):
                        help="Output a non-installable IPA for inspection / external re-signing")
     parser.add_argument("--entitlements", type=Path, help="Entitlements plist when signing")
     parser.add_argument("--profile", type=Path, help="Provisioning profile when signing")
+    parser.add_argument("--require-profiles", action="store_true",
+                        help="Require valid profiles for every .app/.appex when signing")
     parser.add_argument("--max-unpacked-mib", type=int, default=2048)
     args = parser.parse_args(argv)
     try:
@@ -615,7 +626,7 @@ def main(argv=None):
         apply(args.ipa, args.manifest, args.output, allow_unsigned=args.allow_unsigned,
               sign_identity=args.sign_identity, entitlements=args.entitlements,
               profile=args.profile, max_unpacked_mib=args.max_unpacked_mib,
-              dry_run=args.dry_run)
+              dry_run=args.dry_run, require_profiles=args.require_profiles)
     except (IPAError, OSError, subprocess.CalledProcessError, zipfile.BadZipFile) as exc:
         parser.exit(1, "ERROR: %s\n" % exc)
 
