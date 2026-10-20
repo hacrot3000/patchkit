@@ -326,29 +326,83 @@ def patch_operation(app, executable, operation, manifest_dir):
     path.write_bytes(data)
 
 
-def resign(app, identity, entitlements=None, profile=None):
+def signable_paths(app):
+    """Enumerate signing targets with nested bundles before their containers."""
+    extensions = {".app", ".appex", ".framework", ".xpc", ".dylib"}
+    items = []
+    for base, dirs, files in os.walk(app, followlinks=False):
+        for name in dirs + files:
+            candidate = Path(base) / name
+            if not candidate.is_symlink() and candidate.suffix in extensions:
+                items.append(candidate)
+    items.sort(key=lambda p: len(p.relative_to(app).parts), reverse=True)
+    return items + [app]
+
+
+def snapshot_entitlements(app, destination):
+    """Read existing entitlements before any executable signature is removed.
+
+    Using the original per-target entitlements avoids stripping extension
+    capabilities by accident. Output files live outside the app ZIP tree.
+    """
+    if sys.platform != "darwin" or not shutil.which("codesign"):
+        raise IPAError("Signing requires macOS and codesign")
+    saved = {}
+    destination.mkdir(parents=True, exist_ok=True)
+    for i, path in enumerate(signable_paths(app)):
+        relative = path.relative_to(app).as_posix()
+        signed = subprocess.run(["codesign", "-d", "--verbose=1", str(path)],
+                                capture_output=True)
+        if signed.returncode != 0:
+            continue  # Unsigned fixture or locally built app
+        check = subprocess.run(["codesign", "-d", "--entitlements", ":-", str(path)],
+                               capture_output=True)
+        if check.returncode != 0:
+            raise IPAError("Failed to read original entitlements for %s" % relative)
+        raw = check.stdout
+        if not raw.strip():
+            continue
+        try:
+            document = plistlib.loads(raw)
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise IPAError("Invalid original entitlements in %s" % relative) from exc
+        if not isinstance(document, dict):
+            raise IPAError("Entitlements must be a plist dictionary: %s" % relative)
+        out = destination / ("entitlements-%d.plist" % i)
+        out.write_bytes(plistlib.dumps(document))
+        saved[relative] = out
+    return saved
+
+
+def resign(app, identity, entitlements=None, profile=None, original_entitlements=None):
     if sys.platform != "darwin" or not shutil.which("codesign"):
         raise IPAError("Signing requires macOS and codesign")
     if profile:
         shutil.copyfile(profile, app / "embedded.mobileprovision")
-    # Sign embedded binaries and bundles first, the top-level .app last.
-    extensions = {".app", ".appex", ".framework", ".xpc", ".dylib"}
-    signables = []
-    for base, dirs, files in os.walk(app, followlinks=False):
-        for name in dirs + files:
-            p = Path(base) / name
-            if p.is_symlink():
-                continue
-            if p.suffix in extensions:
-                signables.append(p)
-    signables.sort(key=lambda x: len(x.parts), reverse=True)
-    signables.append(app)
-    for path in signables:
+    saved = original_entitlements or {}
+    for path in signable_paths(app):
+        relative = path.relative_to(app).as_posix()
+        path_entitlements = (
+            Path(entitlements) if path == app and entitlements
+            else saved.get(relative)
+        )
         args = ["codesign", "--force", "--sign", identity, "--timestamp=none"]
-        if path == app and entitlements:
-            args += ["--entitlements", str(entitlements)]
+        if path_entitlements is not None:
+            args += ["--entitlements", str(path_entitlements)]
         args.append(str(path))
         subprocess.run(args, check=True)
+        if path_entitlements is not None:
+            observed = subprocess.run(
+                ["codesign", "-d", "--entitlements", ":-", str(path)],
+                capture_output=True, check=True
+            )
+            expected = plistlib.loads(Path(path_entitlements).read_bytes())
+            try:
+                actual = plistlib.loads(observed.stdout)
+            except (ValueError, TypeError) as exc:
+                raise IPAError("Cannot validate new entitlements: %s" % relative) from exc
+            if actual != expected:
+                raise IPAError("Entitlements changed while signing: %s" % relative)
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
 
 
@@ -405,9 +459,12 @@ def apply(ipa, manifest, output, *, allow_unsigned=False, sign_identity=None,
         if digest.hexdigest().lower() != source_hash.lower():
             raise IPAError("Input IPA SHA256 does not match manifest")
     with tempfile.TemporaryDirectory(prefix="patchkit-ipa-") as temp:
-        root = Path(temp)
+        root = Path(temp) / "ipa"
+        root.mkdir()
         extract_ipa(ipa, root, max_unpacked_mib * 1024 * 1024)
         app, executable = app_bundle(root)
+        preserved = (snapshot_entitlements(app, Path(temp) / "__preserved_signatures")
+                     if sign_identity else {})
         structural = []
         structural_started = False
         for i, operation in enumerate(operations):
@@ -428,7 +485,7 @@ def apply(ipa, manifest, output, *, allow_unsigned=False, sign_identity=None,
             details = expand_macho(executable, structural)
             print("Mach-O expansion: %s" % json.dumps(details, sort_keys=True))
         if sign_identity:
-            resign(app, sign_identity, entitlements, profile)
+            resign(app, sign_identity, entitlements, profile, preserved)
         repack(root, output)
     if not sign_identity:
         print("WARNING: output IPA is NOT re-signed and cannot be installed as-is.", file=sys.stderr)
