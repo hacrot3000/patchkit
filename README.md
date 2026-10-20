@@ -223,4 +223,11 @@ certificate and, where needed, `--entitlements` and `--profile`.
 
 See [IPA patch documentation](docs/IPA_PATCHING.md) for the manifest
 schema, examples, required signing, supported operations and limitations.
-Automatic Mach-O injection/hooking is **not yet implemented**.
+Experimental **thin ARM64 Mach-O code expansion and automatic function hooks**
+are implemented using LIEF, Capstone and Keystone. The new `__PKTEXT`
+segment is RX (not RWX); before-hooks can replay verified position-independent
+instructions and return, while replace-hooks can redirect to injected functions.
+ARM64e/FAT structural rewriting, automatic relocation of PC-relative stolen
+instructions, long-range branches, and arbitrary in-place __TEXT resizing
+are not supported and are rejected. Only use on software you are authorized
+to modify; passing CI does not establish iPhone launch or distribution readiness.
