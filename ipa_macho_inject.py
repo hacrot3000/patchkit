@@ -28,9 +28,9 @@ def _dependencies():
             "Mach-O expansion requires: pip install 'lief>=0.17,<2' "
             "keystone-engine capstone"
         ) from exc
-    return lief, Ks(KS_ARCH_ARM64, KS_MODE_LITTLE_ENDIAN), Cs(
-        CS_ARCH_ARM64, CS_MODE_ARM
-    ), arm64_const
+    disassembler = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+    disassembler.detail = True
+    return lief, Ks(KS_ARCH_ARM64, KS_MODE_LITTLE_ENDIAN), disassembler, arm64_const
 
 
 def _assemble(assembler, script, address):
