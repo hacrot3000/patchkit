@@ -63,6 +63,24 @@ class ProvisioningProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(IPAError, "bundle identifier/team"):
             validate_profile(fixture(), BUNDLE, data, now=NOW)
 
+    def test_accepts_legacy_application_identifier_key_alias(self):
+        profile = fixture()
+        profile["Entitlements"]["com.apple.application-identifier"] = (
+            profile["Entitlements"].pop("application-identifier")
+        )
+        self.assertEqual(
+            validate_profile(profile, BUNDLE, signed(), now=NOW)["bundle_id"],
+            BUNDLE
+        )
+        signature = signed()
+        signature["com.apple.application-identifier"] = (
+            signature.pop("application-identifier")
+        )
+        self.assertEqual(
+            validate_profile(fixture(), BUNDLE, signature, now=NOW)["bundle_id"],
+            BUNDLE
+        )
+
     def test_mismatched_provisioning_pattern(self):
         with self.assertRaisesRegex(IPAError, "does not authorize"):
             validate_profile(fixture(app_id=TEAM + ".com.other.*"),
