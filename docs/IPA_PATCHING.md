@@ -303,11 +303,15 @@ not overlap, and LC_MAIN points to an executable segment. This guards against
 some LIEF relayout failures; it does not prove that dyld chained-fixup payloads
 and pointer relocations remain semantically correct.
 
-The macOS CI suite **executes** a small patched ARM64 Mach-O program after
+The macOS CI suite **executes** patched ARM64 Mach-O programs after
 ad-hoc codesign (in addition to checking disassembly, injected segment layout,
-hook return branches, and nested entitlements). This is a macOS test, not a
-validation of iOS installation/launch, App Store eligibility, iOS arm64e,
-or signing with a real provisioning profile.
+hook return branches, and nested entitlements). CI also cross-builds a real
+iPhoneOS SDK ARM64 Mach-O, performs injection/hooking, confirms its
+LC_BUILD_VERSION / deployment target load commands survive LIEF relayout, and
+verifies ad-hoc codesign. The iOS binary cannot be executed by macOS CI.
+Neither these tests nor codesign verification prove actual iPhone installation,
+dyld execution, App Store eligibility, iOS arm64e support, or compatibility with
+a real provisioning profile.
 
 Use only IPA files you own or are authorized to modify. The patcher does not
 remove FairPlay encryption or bypass iOS code-signing requirements.
