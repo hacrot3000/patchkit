@@ -136,7 +136,10 @@ def _relocate_stolen(disassembler, constants, assembler, original, address,
         destination = int(instruction.operands[-1].imm)
         section = original_binary.section_from_virtual_address(destination)
         if section is None or not section.segment_name:
-            raise IPAError("Cannot remap ADR/ADRP target outside known section")
+            raise IPAError("Cannot remap ADR/ADRP target 0x%x (source PC 0x%x; sections %s)" %
+                           (destination, instruction.address,
+                            [(s.name, hex(s.virtual_address), s.size)
+                             for s in original_binary.sections]))
         new_section = rebuilt_binary.get_section(section.segment_name, section.name)
         if new_section is None:
             raise IPAError("ADR/ADRP destination section missing after rebuild")
