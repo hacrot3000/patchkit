@@ -298,9 +298,9 @@ class MachOIntegration(unittest.TestCase):
                 if p.is_file():
                     archive.write(p, "Payload/Nested.app/" + p.relative_to(bundle).as_posix())
         self.manifest.write_text(json.dumps({"operations": [{
-            "type": "replace_bytes", "target": "executable",
-            "old_hex": "1f2003d5", "new_hex": "c0035fd6",
-            "occurrences": 1
+            "type": "patch_address", "target": "executable",
+            "address": hex(self.address),
+            "expected_hex": "1f2003d5", "new_hex": "c0035fd6"
         }]}))
         apply(self.ipa, self.manifest, self.out, sign_identity="-")
         extracted = self.root / "rechecked"
