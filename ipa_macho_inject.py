@@ -84,6 +84,11 @@ def _verify_hook(source, hook, disassembler, constants):
     if addr % 4:
         raise IPAError("Hook address must be 4-byte aligned")
     expected = hexbytes(hook.get("expected_hex"))
+    # Both before- and replace-hooks overwrite whole ARM64 instructions.  A
+    # shorter replacement branch would otherwise grow/shrink the Mach-O bytes
+    # through Python bytearray slice assignment.
+    if len(expected) < 4 or len(expected) % 4:
+        raise IPAError("Hook expected_hex must contain whole 4-byte ARM64 instructions")
     selected = arm64_slice(source)
     if selected.offset != 0:
         raise IPAError("Automatic hook requires a thin, single-architecture arm64 Mach-O")
