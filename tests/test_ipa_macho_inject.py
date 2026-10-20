@@ -467,6 +467,17 @@ class MachOIntegration(unittest.TestCase):
         proc = subprocess.run([str(executable)], capture_output=True, timeout=10)
         self.assertEqual(proc.returncode, 7, proc.stderr)
 
+    def test_require_profiles_fails_closed_when_missing(self):
+        import json
+        self.manifest.write_text(json.dumps({"operations": [{
+            "type": "patch_address", "address": hex(self.address),
+            "expected_hex": "1f2003d5", "new_hex": "c0035fd6"
+        }]}))
+        with self.assertRaisesRegex(IPAError, "Missing embedded.mobileprovision"):
+            apply(self.ipa, self.manifest, self.out,
+                  sign_identity="-", require_profiles=True)
+        self.assertFalse(self.out.exists())
+
     def test_execute_patched_arm64_program(self):
         # Unlike structure-only tests, this exercises dyld and the detour.
         raw = self.patch([
