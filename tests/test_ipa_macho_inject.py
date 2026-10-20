@@ -241,6 +241,42 @@ class MachOIntegration(unittest.TestCase):
         self.assertEqual(read_entitlements(finished / "PlugIns" / "Widget.appex"),
                          {"get-task-allow": False})
 
+    def test_auto_patch_arm64_inline(self):
+        import lief
+        raw = self.patch([{
+            "type": "auto_patch_arm64",
+            "address": hex(self.address),
+            "expected_hex": "1f2003d5",
+            "asm": "ret"
+        }])
+        selected = arm64_slice(raw)
+        pos = address_to_offset(raw, selected, self.address)
+        self.assertEqual(raw[pos:pos + 4], bytes.fromhex("c0035fd6"))
+        self.assertIsNone(lief.MachO.parse(raw).at(0).get_segment("__PKTEXT"))
+
+    def test_auto_patch_arm64_injects_if_too_large(self):
+        import lief
+        raw = self.patch([{
+            "type": "auto_patch_arm64",
+            "address": hex(self.address),
+            "expected_hex": "1f2003d5",
+            "asm": "nop; nop; ret"
+        }])
+        image = lief.MachO.parse(raw).at(0)
+        current = int(image.get_section("__text").virtual_address)
+        self.assertIsNotNone(image.get_segment("__PKTEXT"))
+        selected = arm64_slice(raw)
+        pos = address_to_offset(raw, selected, current)
+        branch, = struct.unpack_from("<I", raw, pos)
+        self.assertEqual(branch & 0xFC000000, 0x14000000)
+        rel = branch & 0x03FFFFFF
+        if rel & (1 << 25):
+            rel -= 1 << 26
+        target = current + rel * 4
+        dest = address_to_offset(raw, selected, target)
+        self.assertEqual(raw[dest:dest + 12],
+                         bytes.fromhex("1f2003d51f2003d5c0035fd6"))
+
     def test_injection_rejects_arm64e(self):
         import json
         self.manifest.write_text(json.dumps({"operations": [{
