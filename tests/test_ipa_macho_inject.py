@@ -31,6 +31,47 @@ class BranchValidation(unittest.TestCase):
                 relative -= 1 << 26
             self.assertEqual(start + relative * 4, finish)
 
+    def test_relocate_bl_and_conditional_preserves_opcodes(self):
+        from ipa_macho_inject import _relocate_pc_branch, _pc_branch_spec
+        class Rebuilt:
+            def get_section(self, segment, section):
+                class Target:
+                    virtual_address = 0x2000
+                return Target()
+        old_pc, new_pc = 0x1000, 0x4000
+        for opcode in (0x94000002, 0x54000040, 0xB4000040,
+                       0xB5000040, 0x36000040, 0x37000040):
+            with self.subTest(opcode=hex(opcode)):
+                raw = struct.pack("<I", opcode)
+                rewritten = _relocate_pc_branch(
+                    raw, old_pc, new_pc,
+                    [("__TEXT", "__text", 0x1000, 0x40)], Rebuilt(),
+                    old_pc, old_pc + 4
+                )
+                word, = struct.unpack("<I", rewritten)
+                bits, shift = _pc_branch_spec(opcode)
+                mask = (1 << bits) - 1
+                self.assertEqual(word & ~(mask << shift),
+                                 opcode & ~(mask << shift))
+                delta = (word >> shift) & mask
+                if delta & (1 << (bits - 1)):
+                    delta -= 1 << bits
+                self.assertEqual(new_pc + delta * 4, 0x2008)
+
+    def test_relocated_conditional_branch_fails_out_of_reach(self):
+        from ipa_macho_inject import _relocate_pc_branch
+        class Rebuilt:
+            def get_section(self, segment, section):
+                class Target:
+                    virtual_address = 0x2000
+                return Target()
+        with self.assertRaisesRegex(IPAError, "out of reach"):
+            _relocate_pc_branch(
+                struct.pack("<I", 0x54000040), 0x1000, 0x5000000,
+                [("__TEXT", "__text", 0x1000, 0x40)], Rebuilt(),
+                0x1000, 0x1004
+            )
+
     def test_branch_too_far(self):
         with self.assertRaisesRegex(IPAError, "reach"):
             _branch(0x1000, 0x1000 + (1 << 27))
