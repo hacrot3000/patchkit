@@ -401,6 +401,8 @@ def validate_macho_integrity(original, rebuilt):
         0x2, 0xB,  # SYMTAB, DYSYMTAB
         0xC, 0x18, 0x1F, 0x20,  # load family of dylibs
         0x8000001C,  # LC_RPATH
+        0x32,  # LC_BUILD_VERSION (platform / deployment target)
+        0x24, 0x25, 0x2F, 0x30,  # LC_VERSION_MIN_{MACOSX,IPHONEOS,TVOS,WATCHOS}
     }
     for kind in critical:
         old_count = sum(cmd == kind for cmd, _ in before)
@@ -408,6 +410,15 @@ def validate_macho_integrity(original, rebuilt):
         if old_count != new_count:
             raise IPAError("Critical Mach-O command changed (0x%x): %d -> %d" %
                            (kind, old_count, new_count))
+    # A correctly linked iOS binary must not silently turn into a macOS
+    # Mach-O, nor lose its deployment target when LIEF rewrites load commands.
+    versions = {0x32, 0x24, 0x25, 0x2F, 0x30}
+    for command in versions:
+        old_data = [payload for code, payload in before if code == command]
+        new_data = [payload for code, payload in after if code == command]
+        if old_data != new_data:
+            raise IPAError("Mach-O target platform/deployment version changed (0x%x)" %
+                           command)
     file_size = len(rebuilt)
     # Most LINKEDIT data commands use uint32 dataoff/datasize at +8/+12.
     linkedit_data = {0x1D, 0x1E, 0x26, 0x29, 0x2B, 0x2E,
