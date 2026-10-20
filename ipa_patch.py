@@ -471,6 +471,51 @@ def apply(ipa, manifest, output, *, allow_unsigned=False, sign_identity=None,
             try:
                 if not isinstance(operation, dict):
                     raise IPAError("Every operation must be a JSON object")
+                if operation.get("type") == "auto_patch_arm64":
+                    if operation.get("target", "executable") != "executable":
+                        raise IPAError("auto_patch_arm64 supports main executable only")
+                    if operation.get("arch", "arm64") != "arm64":
+                        raise IPAError("auto_patch_arm64 currently requires arm64")
+                    address = number(operation.get("address"))
+                    original = hexbytes(operation.get("expected_hex"))
+                    if address % 4 or len(original) < 4 or len(original) % 4:
+                        raise IPAError("auto_patch_arm64 requires aligned complete ARM64 instructions")
+                    script = operation.get("asm")
+                    if not isinstance(script, str) or not script.strip():
+                        raise IPAError("auto_patch_arm64 requires asm")
+                    try:
+                        from keystone import Ks, KS_ARCH_ARM64, KS_MODE_LITTLE_ENDIAN
+                    except ImportError as exc:
+                        raise IPAError("auto_patch_arm64 requires keystone-engine") from exc
+                    encoder = Ks(KS_ARCH_ARM64, KS_MODE_LITTLE_ENDIAN)
+                    try:
+                        compiled, _ = encoder.asm(script, addr=address)
+                    except Exception as exc:
+                        raise IPAError("ARM64 assembly failed: %s" % exc) from exc
+                    payload = bytes(compiled)
+                    if not payload or len(payload) % 4:
+                        raise IPAError("auto_patch_arm64 must assemble whole instructions")
+                    if len(payload) <= len(original):
+                        if structural_started:
+                            raise IPAError("Inline auto patches must precede structural operations")
+                        payload += bytes.fromhex("1f2003d5") * ((len(original) - len(payload)) // 4)
+                        patch_operation(app, executable, {
+                            "type": "patch_address", "target": "executable",
+                            "arch": "arm64", "address": address,
+                            "expected_hex": original.hex(), "new_hex": payload.hex()
+                        }, manifest.parent)
+                    else:
+                        structural_started = True
+                        generated = "__patchkit_auto_%d" % i
+                        structural.append({
+                            "type": "inject_arm64", "name": generated, "asm": script
+                        })
+                        structural.append({
+                            "type": "hook_arm64", "mode": "replace",
+                            "address": address, "expected_hex": original.hex(),
+                            "symbol": generated
+                        })
+                    continue
                 if operation.get("type") in ("inject_arm64", "hook_arm64", "extend_macho"):
                     structural_started = True
                     structural.append(operation)
