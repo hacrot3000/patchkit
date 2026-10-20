@@ -350,6 +350,11 @@ a real provisioning profile.
 Use only IPA files you own or are authorized to modify. The patcher does not
 remove FairPlay encryption or bypass iOS code-signing requirements.
 
+For manual testing on an authorized paired iPhone, see
+[On-device IPA smoke test](IPA_DEVICE_VALIDATION.md). The opt-in helper first
+verifies the signature, then uses Xcode devicectl to install and request launch.
+CI tests its failure handling but cannot attest to iPhone runtime behavior.
+
 
 ### Explicit long-range branch mode
 
