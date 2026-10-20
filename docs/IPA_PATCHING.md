@@ -15,11 +15,17 @@ and its Python 2 dependencies are unchanged.
   `__PKTEXT` segment, inject ARM64 assembly, and install verified
   direct-branch function detours with optional return trampolines.
 - Replace bytes in existing bundle resources or replace existing resource files.
+- Auto-select inline ARM64 replacement or out-of-line injection with
+  `auto_patch_arm64` when the new ASM outgrows the original instruction region.
+- Target the executable inside an embedded framework or app extension by using
+  `"target": "Frameworks/Foo.framework/Foo"` or `"target": "PlugIns/Bar.appex/Bar"`.
 - Optionally re-sign on macOS with codesign, supplying your own signing identity,
-  entitlements and provisioning profile.
+  entitlements and provisioning profile. Original per-bundle entitlements are
+  captured before rewriting and preserved when nested bundles are signed.
 
 **Not supported:** arbitrary reflow/resizing of existing __TEXT instructions,
-relocating PC-relative stolen instructions, branch islands for code beyond
+relocating arbitrary PC-relative stolen instructions (ADR/ADRP in mapped
+sections are supported), branch islands for code beyond
 +/-128MiB, FAT/universal or arm64e automatic hooks, pointer authentication and
 BTI handling, Swift symbol resolution, FairPlay decryption, App Store IPA DRM,
 on-device hotpatching or bypassing signing rules. Thin arm64 segment growth is
@@ -121,6 +127,10 @@ On Linux (inspection only, output cannot be installed as-is):
     python3 ipa_patch.py original.ipa patches.json \
       -o patched-unresigned.ipa --allow-unsigned
 
+To validate a patch and Mach-O layout **without writing or signing an IPA**:
+
+    python3 ipa_patch.py original.ipa patches.json --dry-run
+
 On macOS (use the correct certificate, entitlements and profile for the app):
 
     python3 ipa_patch.py original.ipa patches.json \
@@ -129,8 +139,11 @@ On macOS (use the correct certificate, entitlements and profile for the app):
       --entitlements app.entitlements --profile dev.mobileprovision
 
 For applications containing extensions or frameworks, the tool signs embedded
-binaries/bundles inside-out, then the top-level application, and calls
-codesign --verify. Passing codesign verification does **not** guarantee the
+binaries/bundles inside-out, restores each originally signed bundle's original
+entitlements (unless an explicit root --entitlements file is provided), then
+signs the top-level application and calls codesign --verify. Existing nested
+embedded.mobileprovision files remain within the bundle; --profile replaces
+only the top-level application's profile. Passing codesign verification does **not** guarantee the
 entitlements, provisioning profile, bundle IDs, and distribution method are
 compatible with a target device. Verify installation and launch on a real
 device with the intended distribution channel.
@@ -204,8 +217,11 @@ instruction(s), use:
 In `before` mode, the generated detour runs your injected instructions,
 replays the original complete instructions that were replaced, and branches
 back to the next original address. This is only supported when those original
-instructions are position-independent **and** do not contain branches, literal
-loads, ADR/ADRP, BTI or PAC/AUT instructions. The manifest author is
+instructions are position-independent **or** are supported ADR/ADRP references
+whose destination can be remapped into an existing Mach-O section. Unconditional
+and conditional branches, literal loads, BTI, PAC/AUT and other unimplemented
+PC-relative instructions remain refused. ADR/ADRP may expand from one to two
+instructions in the trampoline when necessary. The manifest author is
 responsible for ABI correctness: custom assembly must preserve any register,
 flags, link register, and stack state used by the interrupted function. In
 `replace` mode, the hook branches to the named injected function instead of
@@ -231,3 +247,52 @@ The test workflow runs fast synthetic IPA checks on Linux and macOS.
 On macOS it also builds a minimal arm64 Mach-O executable, inserts an RX
 segment, injects code and verifies detour/trampoline layout. These tests do
 not execute the patched ARM64 binary or install a patched IPA on iPhone.
+
+
+## Automatic patch expansion
+
+The `auto_patch_arm64` operation accepts the original address, exact original
+bytes, and a replacement assembly block:
+
+```json
+{
+  "operations": [
+    {
+      "type": "auto_patch_arm64",
+      "address": "0x100003000",
+      "expected_hex": "1f2003d5",
+      "asm": "nop; nop; ret"
+    }
+  ]
+}
+```
+
+If the generated assembly fits within `expected_hex`, the tool writes an
+in-place replacement and pads the remainder with ARM64 NOP. Otherwise, it
+automatically emits an `inject_arm64` operation into RX `__PKTEXT` and uses
+a `replace` hook at the original address. This is a replacement, **not** a
+wrapper around the original function: the manifest author is responsible for
+return behavior and ABI. All structural operations must appear after ordinary
+patches. The operation is currently supported on regular ARM64 only.
+
+Set `"target"` to select another Mach-O binary inside the IPA, e.g. an
+embedded framework/extension executable. Each target gets its own expansion
+segment. Nested signed bundles are signed again from the inside out, preserving
+their previously encoded entitlements.
+
+## Structural verification and actual execution
+
+The code-expansion pipeline also checks that critical load commands remain
+present, LINKEDIT tables fall within the output file, file-backed segments do
+not overlap, and LC_MAIN points to an executable segment. This guards against
+some LIEF relayout failures; it does not prove that dyld chained-fixup payloads
+and pointer relocations remain semantically correct.
+
+The macOS CI suite **executes** a small patched ARM64 Mach-O program after
+ad-hoc codesign (in addition to checking disassembly, injected segment layout,
+hook return branches, and nested entitlements). This is a macOS test, not a
+validation of iOS installation/launch, App Store eligibility, iOS arm64e,
+or signing with a real provisioning profile.
+
+Use only IPA files you own or are authorized to modify. The patcher does not
+remove FairPlay encryption or bypass iOS code-signing requirements.
