@@ -9,7 +9,7 @@ from pathlib import Path
 import plistlib
 import subprocess
 
-from ipa_patch import IPAError
+from ipa_errors import IPAError
 
 
 # These capabilities must be provisioned. Some non-provisioned entitlements
