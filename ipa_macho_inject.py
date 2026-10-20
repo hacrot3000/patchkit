@@ -78,6 +78,29 @@ def _copyable_stolen(disassembler, constants, original, address):
 
 
 
+
+def _encode_pc_relative(destination_register, target, pc, *, page=False):
+    """Encode ADR/ADRP directly (Keystone may reject Mach-O 64-bit VAs)."""
+    if not 0 <= destination_register <= 30:
+        raise IPAError("ADR/ADRP requires an x0..x30 destination")
+    delta = ((target & ~0xFFF) - (pc & ~0xFFF)) // 4096 if page else target - pc
+    if not -(1 << 20) <= delta < (1 << 20):
+        raise IPAError("ADR/ADRP target beyond signed 21-bit displacement")
+    immediate = delta & 0x1FFFFF
+    word = ((0x90000000 if page else 0x10000000)
+            | ((immediate & 3) << 29)
+            | (((immediate >> 2) & 0x7FFFF) << 5)
+            | destination_register)
+    return struct.pack("<I", word)
+
+
+def _encode_add_low12(register, value):
+    if not 0 <= register <= 30 or not 0 <= value < 4096:
+        raise IPAError("Invalid ADD immediate or register")
+    return struct.pack("<I", 0x91000000 | (value << 10) |
+                       (register << 5) | register)
+
+
 def _validate_relocatable_stolen(disassembler, constants, original, address):
     if len(original) < 4 or len(original) % 4:
         raise IPAError("Hook must overwrite whole ARM64 instructions")
@@ -119,23 +142,19 @@ def _relocate_stolen(disassembler, constants, assembler, original, address,
             raise IPAError("ADR/ADRP destination section missing after rebuild")
         destination = int(new_section.virtual_address) + destination - int(section.virtual_address)
         register = instruction.op_str.split(",")[0].strip()
+        if not register.startswith("x") or not register[1:].isdigit():
+            raise IPAError("ADR/ADRP destination must be x0..x30")
+        rd = int(register[1:])
         pc = trampoline_address + len(relocated)
         if mnemonic == "adrp":
-            script = "adrp %s, #0x%x" % (register, destination & ~0xfff)
-            payload = _assemble(assembler, script, pc)
+            payload = _encode_pc_relative(rd, destination, pc, page=True)
         elif -(1 << 20) <= destination - pc < (1 << 20):
-            payload = _assemble(assembler, "adr %s, #0x%x" % (
-                register, destination), pc)
+            payload = _encode_pc_relative(rd, destination, pc)
         else:
             # ADR has +/-1MiB reach. ADRP+ADD preserves register semantics
-            # without borrowing a scratch register and is PC/ASLR-relative.
-            payload = _assemble(
-                assembler,
-                "adrp %s, #0x%x; add %s, %s, #0x%x" % (
-                    register, destination & ~0xfff, register, register,
-                    destination & 0xfff
-                ), pc
-            )
+            # without borrowing a scratch register and remains ASLR-relative.
+            payload = (_encode_pc_relative(rd, destination, pc, page=True)
+                       + _encode_add_low12(rd, destination & 0xfff))
         relocated.extend(payload)
     return bytes(relocated)
 
