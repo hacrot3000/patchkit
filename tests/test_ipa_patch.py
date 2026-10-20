@@ -2,6 +2,8 @@ import hashlib
 import importlib.util
 import json
 import plistlib
+import subprocess
+import sys
 import stat
 import struct
 import tempfile
@@ -173,6 +175,20 @@ class IPATests(unittest.TestCase):
             extract_ipa(self.out, root, 1024 * 1024)
             self.assertTrue((root / "Payload/Sample.app/note-alias.txt").is_symlink())
             verify_repacked_archive(root, self.out)
+
+    def test_cli_structural_failure_has_user_friendly_error(self):
+        # Guard against __main__.IPAError vs ipa_patch.IPAError duplication.
+        self.write_manifest({"type": "hook_arm64", "address": hex(VMADDR + 0x100),
+                             "expected_hex": "ffffffff", "asm": "nop"})
+        proc = subprocess.run([
+            sys.executable, str(Path(__file__).resolve().parents[1] / "ipa_patch.py"),
+            str(self.source), str(self.manifest), "-o", str(self.out),
+            "--allow-unsigned"
+        ], text=True, capture_output=True)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("ERROR:", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertFalse(self.out.exists())
 
     def test_signing_is_explicit(self):
         self.write_manifest({"type": "replace_file", "target": "note.txt", "source": "new.txt"})
