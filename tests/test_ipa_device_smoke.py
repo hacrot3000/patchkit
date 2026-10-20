@@ -39,7 +39,7 @@ class DeviceSmokeTests(unittest.TestCase):
 
     def test_execute_requires_mac(self):
         with patch("tools.ipa_device_smoke.sys.platform", "linux"):
-            with self.assertRaisesRegex(IPAError, "requires macOS"):
+            with self.assertRaisesRegex(IPAError, "require macOS"):
                 smoke(self.ipa, "DEVICE-123", execute=True)
 
     def test_execute_checks_signature_before_install(self):
