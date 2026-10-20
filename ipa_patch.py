@@ -562,7 +562,8 @@ def apply(ipa, manifest, output=None, *, allow_unsigned=False, sign_identity=Non
                         structural[target].append({
                             "type": "hook_arm64", "target": target,
                             "mode": "replace", "address": address,
-                            "expected_hex": original.hex(), "symbol": generated
+                            "expected_hex": original.hex(), "symbol": generated,
+                            "long_branch": operation.get("long_branch")
                         })
                     continue
                 if operation.get("type") in ("inject_arm64", "hook_arm64", "extend_macho"):
