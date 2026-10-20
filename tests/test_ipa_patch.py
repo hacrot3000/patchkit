@@ -1,4 +1,5 @@
 import hashlib
+import importlib.util
 import json
 import plistlib
 import stat
@@ -71,6 +72,13 @@ class IPATests(unittest.TestCase):
     def test_patch_macho_offset(self):
         self.write_manifest({"type": "patch_offset", "offset": "0x100",
                              "expected_hex": OLD.hex(), "new_hex": NEW.hex()})
+        self.run_patch()
+        self.assertEqual(entry(self.out, "Sample")[0x100:0x104], NEW)
+
+    @unittest.skipUnless(importlib.util.find_spec("keystone"), "keystone-engine not installed")
+    def test_arm64_assembly(self):
+        self.write_manifest({"type": "arm64_asm", "address": hex(VMADDR + 0x100),
+                             "expected_hex": OLD.hex(), "asm": "ret"})
         self.run_patch()
         self.assertEqual(entry(self.out, "Sample")[0x100:0x104], NEW)
 
