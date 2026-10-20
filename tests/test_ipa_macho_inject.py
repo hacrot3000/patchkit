@@ -318,6 +318,70 @@ class MachOIntegration(unittest.TestCase):
         self.assertEqual(read_entitlements(finished / "PlugIns" / "Widget.appex"),
                          {"get-task-allow": False})
 
+    def test_conditional_branches_relocate_and_execute(self):
+        # The branch jumps from the stolen instruction to original _main+8
+        # (RET), skipping _main+4 (MOV X0, #9) if relocation is correct.
+        variants = (
+            ("b.eq", 0x54000040, "mov x0, #7; cmp x0, #7", 7),
+            ("cbz", 0xB4000040, "mov x0, #0", 0),
+            ("cbnz", 0xB5000040, "mov x0, #7", 7),
+            ("tbz", 0x36000040, "mov x0, #0", 0),
+            ("tbnz", 0x37000040, "mov x0, #7", 7),
+            ("b", 0x14000002, "mov x0, #7", 7),
+        )
+        for index, (label, opcode, injected_asm, exit_code) in enumerate(variants):
+            with self.subTest(instruction=label):
+                # Create a fresh IPA: a malformed result must not be hidden by
+                # previous patches from this loop.
+                ipa = self.root / ("branch-fixture-%d.ipa" % index)
+                output = self.root / ("branch-output-%d.ipa" % index)
+                manifest = self.root / ("branch-manifest-%d.json" % index)
+                with zipfile.ZipFile(ipa, "w") as archive:
+                    archive.writestr("Payload/Test.app/Info.plist", plistlib.dumps({
+                        "CFBundleExecutable": "test_arm64",
+                        "CFBundleIdentifier": "patchkit.arm64.test"
+                    }))
+                    archive.write(self.binary, "Payload/Test.app/test_arm64")
+                import json
+                manifest.write_text(json.dumps({"operations": [
+                    {"type": "patch_address", "address": hex(self.address),
+                     "expected_hex": "1f2003d5",
+                     "new_hex": struct.pack("<I", opcode).hex()},
+                    {"type": "patch_address", "address": hex(self.address + 4),
+                     "expected_hex": "000080d2", "new_hex": "200180d2"},
+                    {"type": "hook_arm64", "mode": "before",
+                     "address": hex(self.address),
+                     "expected_hex": struct.pack("<I", opcode).hex(),
+                     "asm": injected_asm}
+                ]}))
+                apply(ipa, manifest, output, allow_unsigned=True)
+                with zipfile.ZipFile(output) as archive:
+                    raw = archive.read("Payload/Test.app/test_arm64")
+                executable = self.root / ("branch-exec-%d" % index)
+                executable.write_bytes(raw)
+                executable.chmod(0o755)
+                subprocess.run(["codesign", "--force", "--sign", "-",
+                                "--timestamp=none", str(executable)],
+                               check=True, capture_output=True)
+                proc = subprocess.run([str(executable)],
+                                      capture_output=True, timeout=10)
+                self.assertEqual(proc.returncode, exit_code,
+                                 "%s: %r" % (label, proc.stderr))
+
+    def test_reject_branch_into_stolen_region(self):
+        # B to itself remains inside the original overwritten region.
+        import json
+        self.manifest.write_text(json.dumps({"operations": [
+            {"type": "patch_address", "address": hex(self.address),
+             "expected_hex": "1f2003d5", "new_hex": "00000014"},
+            {"type": "hook_arm64", "mode": "before",
+             "address": hex(self.address), "expected_hex": "00000014",
+             "asm": "nop"}
+        ]}))
+        with self.assertRaisesRegex(IPAError, "overwritten instruction range"):
+            apply(self.ipa, self.manifest, self.out, allow_unsigned=True)
+        self.assertFalse(self.out.exists())
+
     def test_before_hook_relocates_ldr_literal_and_executes(self):
         import lief
         displacement = self.literal_address - self.address
