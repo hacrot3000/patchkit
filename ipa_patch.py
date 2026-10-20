@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Patch an iOS IPA offline without changing PatchKit's legacy ELF backend.
 
-This module deliberately supports *in-place, fixed-size* ARM64 edits only.
-Mach-O segment growth, relocation, injection and hooks are not implemented.
+Supports fixed-size patches and experimental LIEF-backed ARM64 segment growth,
+injection and verified hooks. See docs/IPA_PATCHING.md for limitations.
 """
 import argparse
 import hashlib
@@ -430,12 +430,15 @@ def repack(root, destination):
         tmp.unlink(missing_ok=True)
 
 
-def apply(ipa, manifest, output, *, allow_unsigned=False, sign_identity=None,
-          entitlements=None, profile=None, max_unpacked_mib=2048):
-    ipa, manifest, output = Path(ipa).resolve(), Path(manifest).resolve(), Path(output).resolve()
-    if ipa == output:
+def apply(ipa, manifest, output=None, *, allow_unsigned=False, sign_identity=None,
+          entitlements=None, profile=None, max_unpacked_mib=2048, dry_run=False):
+    ipa, manifest = Path(ipa).resolve(), Path(manifest).resolve()
+    output = Path(output).resolve() if output is not None else None
+    if output is not None and ipa == output:
         raise IPAError("Output must differ from input IPA")
-    if not sign_identity and not allow_unsigned:
+    if not dry_run and output is None:
+        raise IPAError("Specify an output path unless --dry-run is enabled")
+    if not dry_run and not sign_identity and not allow_unsigned:
         raise IPAError("Specify --sign-identity or explicitly --allow-unsigned")
     if entitlements and not sign_identity:
         raise IPAError("--entitlements requires --sign-identity")
@@ -464,7 +467,7 @@ def apply(ipa, manifest, output, *, allow_unsigned=False, sign_identity=None,
         extract_ipa(ipa, root, max_unpacked_mib * 1024 * 1024)
         app, executable = app_bundle(root)
         preserved = (snapshot_entitlements(app, Path(temp) / "__preserved_signatures")
-                     if sign_identity else {})
+                     if sign_identity and not dry_run else {})
         structural = {}
         structural_started = False
         for i, operation in enumerate(operations):
@@ -534,6 +537,10 @@ def apply(ipa, manifest, output, *, allow_unsigned=False, sign_identity=None,
                 selected_binary = target_file(app, executable, target)
                 details = expand_macho(selected_binary, operations_for_target)
                 print("Mach-O expansion %s: %s" % (target, json.dumps(details, sort_keys=True)))
+        if dry_run:
+            print("DRY RUN PASS: all patch operations and Mach-O structural checks passed; "
+                  "no IPA output written and no signing attempted.")
+            return
         if sign_identity:
             resign(app, sign_identity, entitlements, profile, preserved)
         repack(root, output)
@@ -543,11 +550,13 @@ def apply(ipa, manifest, output, *, allow_unsigned=False, sign_identity=None,
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Patch iOS IPA (fixed-size ARM64 and resources)")
+    parser = argparse.ArgumentParser(description="Patch iOS IPA (ARM64, inject/hook and resources)")
     parser.add_argument("ipa", type=Path, help="Input IPA")
     parser.add_argument("manifest", type=Path, help="JSON patch manifest")
-    parser.add_argument("-o", "--output", required=True, type=Path)
-    group = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument("-o", "--output", type=Path)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Validate and simulate patch without signing/writing an IPA")
+    group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument("--sign-identity", help="macOS codesign identity")
     group.add_argument("--allow-unsigned", action="store_true",
                        help="Output a non-installable IPA for inspection / external re-signing")
@@ -560,7 +569,8 @@ def main(argv=None):
             raise IPAError("--max-unpacked-mib must be positive")
         apply(args.ipa, args.manifest, args.output, allow_unsigned=args.allow_unsigned,
               sign_identity=args.sign_identity, entitlements=args.entitlements,
-              profile=args.profile, max_unpacked_mib=args.max_unpacked_mib)
+              profile=args.profile, max_unpacked_mib=args.max_unpacked_mib,
+              dry_run=args.dry_run)
     except (IPAError, OSError, subprocess.CalledProcessError, zipfile.BadZipFile) as exc:
         parser.exit(1, "ERROR: %s\n" % exc)
 
