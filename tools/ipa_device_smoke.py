@@ -52,13 +52,19 @@ def smoke(ipa, device, *, execute=False, max_unpacked_mib=2048):
         app, bundle_id = inspect_app(root)
         result["bundle_id"] = bundle_id
         commands = plan_commands(device, app, bundle_id)
-        result["commands"] = commands
         if not execute:
+            result["commands"] = [
+                ["${EXTRACTED_APP}" if value == str(app) else value
+                 for value in command] for command in commands
+            ]
             result["result"] = "PLAN_ONLY"
+            result["note"] = ("EXTRACTED_APP is a placeholder; plan mode cleans up "
+                              "the temporary extracted application.")
             return result
+        result["commands"] = commands
         for command in commands:
-            step = {"action": command[0] if command[0] == "codesign"
-                    else command[4] if len(command) > 4 else "devicectl"}
+            step = {"action": "verify_signature" if command[0] == "codesign"
+                    else ("install" if command[3] == "install" else "launch")}
             try:
                 output = subprocess.run(command, capture_output=True, text=True,
                                         timeout=120, check=False)
