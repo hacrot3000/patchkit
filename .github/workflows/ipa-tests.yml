@@ -19,6 +19,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install optional ARM64 assembler
+        run: python -m pip install keystone-engine==0.9.2
       - name: Compile
         run: python -m py_compile ipa_patch.py tests/test_ipa_patch.py
       - name: Unit tests
