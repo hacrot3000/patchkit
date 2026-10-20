@@ -227,6 +227,9 @@ python3 ipa_patch.py input.ipa patches.json --dry-run
 For a signed IPA, use `--sign-identity` on macOS with the right signing
 certificate and, where needed, `--entitlements` and `--profile`.
 The original entitlements of each nested signed bundle are retained by default.
+Any embedded provisioning profiles are checked against each signed bundle's
+identifier, team, entitlements and expiry. Use `--require-profiles` to reject
+missing extension profiles when preparing an installable release.
 
 See [IPA patch documentation](docs/IPA_PATCHING.md) for the manifest
 schema, examples, required signing, supported operations and limitations.
