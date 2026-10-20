@@ -119,7 +119,7 @@ def _validate_relocatable_stolen(disassembler, constants, original, address):
 
 
 def _relocate_stolen(disassembler, constants, assembler, original, address,
-                     trampoline_address, original_binary, rebuilt_binary):
+                     trampoline_address, original_sections_snapshot, rebuilt_binary):
     """Relocate safe ARM64 instructions, including ADR and ADRP.
 
     A PC-relative destination must map into a known section after LIEF
@@ -134,16 +134,22 @@ def _relocate_stolen(disassembler, constants, assembler, original, address,
             relocated.extend(instruction.bytes)
             continue
         destination = int(instruction.operands[-1].imm)
-        section = original_binary.section_from_virtual_address(destination)
-        if section is None or not section.segment_name:
-            raise IPAError("Cannot remap ADR/ADRP target 0x%x (source PC 0x%x; sections %s)" %
-                           (destination, instruction.address,
-                            [(s.name, hex(s.virtual_address), s.size)
-                             for s in original_binary.sections]))
-        new_section = rebuilt_binary.get_section(section.segment_name, section.name)
+        # LIEF mutates the original Binary object when adding a segment.
+        # Use a frozen pre-mutation section table, never binary.sections here.
+        original_section = next((
+            (segment_name, section_name, old_address)
+            for segment_name, section_name, old_address, old_size
+            in original_sections_snapshot
+            if old_address <= destination < old_address + old_size
+        ), None)
+        if original_section is None:
+            raise IPAError("Cannot remap ADR/ADRP target 0x%x (source PC 0x%x)" %
+                           (destination, instruction.address))
+        segment_name, section_name, old_section_start = original_section
+        new_section = rebuilt_binary.get_section(segment_name, section_name)
         if new_section is None:
             raise IPAError("ADR/ADRP destination section missing after rebuild")
-        destination = int(new_section.virtual_address) + destination - int(section.virtual_address)
+        destination = int(new_section.virtual_address) + destination - old_section_start
         register = instruction.op_str.split(",")[0].strip()
         if not register.startswith("x") or not register[1:].isdigit():
             raise IPAError("ADR/ADRP destination must be x0..x30")
@@ -390,6 +396,10 @@ def expand_macho(path, operations, report=None):
         original_sections[index] = (
             section.segment_name, section.name, old_addr - section.virtual_address
         )
+    original_sections_snapshot = [
+        (s.segment_name, s.name, int(s.virtual_address), int(s.size))
+        for s in binary.sections
+    ]
     # Original signature cannot survive executable modifications; top-level IPA
     # signing or explicit --allow-unsigned is handled by ipa_patch.py.
     binary.remove_signature()
@@ -441,7 +451,7 @@ def expand_macho(path, operations, report=None):
                     body = _assemble(assembler, item["asm"], address)
                     replay = _relocate_stolen(
                         disassembler, constants, assembler, stolen, old_addr,
-                        address + len(body), binary, rebuilt_binary
+                        address + len(body), original_sections_snapshot, rebuilt_binary
                     )
                     payload = body + replay
                     payload += _branch(address + len(payload), current_addr + len(stolen))
