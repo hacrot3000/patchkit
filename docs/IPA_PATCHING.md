@@ -33,7 +33,10 @@ A modified IPA is not guaranteed to be accepted by iOS or App Store distribution
 
 ## Example manifest
 
-Save as patches.json:
+Save as patches.json. To pin the exact input release, you may add an optional
+top-level `"input_sha256": "<64 hex characters>"` next to `"operations"`;
+the tool refuses to patch a different IPA (recommended for release automation).
+
 
     {
       "operations": [
@@ -93,6 +96,8 @@ intend and the original bytes/addresses from your own IPA.
   occurrences matches (defaults to 1), and preserves byte length.
 - replace_file replaces an existing file; source paths are relative to the
   manifest file location.
+- When input_sha256 is supplied, the original entire IPA ZIP is SHA256-checked
+  before unpacking.
 - Multiple operations run in manifest order and fail immediately on mismatch.
   The original IPA is not changed. The output is committed atomically only
   after patching/signing succeeds.
@@ -126,7 +131,7 @@ Run the deterministic synthetic-fixture tests:
 
     python3 -m unittest discover -s tests -v
 
-The IPA extractor rejects absolute/parent-traversal paths, duplicate members,
+Encrypted Mach-O slices are rejected. The IPA extractor rejects absolute/parent-traversal paths, duplicate members,
 unsafe symlinks, special device files and excessive advertised uncompressed
 size (default 2048 MiB; override with --max-unpacked-mib). Never patch encrypted
 binaries. Patch instructions only at verified addresses and test independently
