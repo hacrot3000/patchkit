@@ -22,6 +22,8 @@ and its Python 2 dependencies are unchanged.
 - Optionally re-sign on macOS with codesign, supplying your own signing identity,
   entitlements and provisioning profile. Original per-bundle entitlements are
   captured before rewriting and preserved when nested bundles are signed.
+  Any embedded profiles are checked against the signed bundle identifiers,
+  entitlements and profile expiration dates.
 
 **Not supported:** arbitrary reflow/resizing of existing __TEXT instructions,
 relocating arbitrary PC-relative stolen instructions (ADR/ADRP, in-range
@@ -138,7 +140,8 @@ On macOS (use the correct certificate, entitlements and profile for the app):
     python3 ipa_patch.py original.ipa patches.json \
       -o patched-signed.ipa \
       --sign-identity "Apple Development: Your Name (TEAMID)" \
-      --entitlements app.entitlements --profile dev.mobileprovision
+      --entitlements app.entitlements --profile dev.mobileprovision \
+      --require-profiles
 
 For applications containing extensions or frameworks, the tool signs embedded
 binaries/bundles inside-out, restores each originally signed bundle's original
@@ -149,6 +152,36 @@ only the top-level application's profile. Passing codesign verification does **n
 entitlements, provisioning profile, bundle IDs, and distribution method are
 compatible with a target device. Verify installation and launch on a real
 device with the intended distribution channel.
+
+## Provisioning profile checks (macOS signing)
+
+During `--sign-identity`, PatchKit reads the **actual signed entitlements**
+from every app/extension containing `embedded.mobileprovision`, decodes the
+profile CMS via macOS `security cms -D`, and checks:
+
+- Profile expiration date, TeamIdentifier, and exact signed bundle ID/team
+  combination (including Apple's terminal-wildcard profile App ID support).
+- Whether the profile grants requested application IDs, keychain groups,
+  app groups, push environment and other known provisioning-bound entitlements.
+- Whether an explicit `--profile` has a profile for every nested
+  `.app`/`.appex` as well. Each extension requires **its own appropriate**
+  provisioning profile; reusing the main app's profile is not sufficient.
+
+Use `--require-profiles` on signed release candidates to fail when any app
+or extension is missing an embedded provisioning profile. Without this flag,
+an existing embedded profile is still validated, but unsigned test fixtures
+without profiles remain supported.
+
+**Important:** These checks are compatibility checks, **not** Apple's CMS
+certificate-chain verification, revocation checking, signing identity-to-team
+certificate verification, UDID eligibility testing or proof of actual iOS
+installation. `security cms -D` decodes the CMS payload; `codesign --verify`
+checks code signatures. Installation must still be tested on an authorized
+physical iPhone with the intended Apple provisioning and distribution method.
+
+The patcher rejects known provisioning conflicts rather than silently changing
+protected signed entitlements. It cannot automatically issue an Apple
+Development/Distribution certificate or generate new team-specific profiles.
 
 For more detail on legacy ELF patching, see ../README.md.
 
@@ -306,7 +339,8 @@ and pointer relocations remain semantically correct.
 The macOS CI suite **executes** patched ARM64 Mach-O programs after
 ad-hoc codesign (in addition to checking disassembly, injected segment layout,
 hook return branches, and nested entitlements). CI also cross-builds a real
-iPhoneOS SDK ARM64 Mach-O, performs injection/hooking, confirms its
+iPhoneOS SDK ARM64 **MH_EXECUTE** (rather than a dylib standing in for an
+executable), performs injection/hooking, confirms its
 LC_BUILD_VERSION / deployment target load commands survive LIEF relayout, and
 verifies ad-hoc codesign. The iOS binary cannot be executed by macOS CI.
 Neither these tests nor codesign verification prove actual iPhone installation,
