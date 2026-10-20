@@ -233,10 +233,12 @@ schema, examples, required signing, supported operations and limitations.
 Experimental **thin ARM64 Mach-O code expansion and automatic function hooks**
 are implemented using LIEF, Capstone and Keystone. The new `__PKTEXT`
 segment is RX (not RWX); before-hooks can replay verified position-independent
-instructions (including safely remapped ADR/ADRP) and return, while
-replace-hooks can redirect to injected functions. `auto_patch_arm64` uses
-in-place replacement where possible and inject+hook for longer code; embedded
-framework and extension executables can be targeted. ARM64e/FAT structural
-rewriting, arbitrary PC-relative relocation, long-range branches and arbitrary
-in-place __TEXT resizing are not supported and are rejected. Only use on software you are authorized
+instructions (including safely remapped ADR/ADRP and in-range LDR
+literals) and return, while replace-hooks redirect to injected functions.
+`auto_patch_arm64` uses in-place replacement where possible and inject+hook
+for longer code; embedded framework and extension executables can be targeted.
+Optional `long_branch: "x16"` enables ASLR-safe 12-byte far detours, but
+explicitly clobbers x16. Repacked IPAs are re-read and content-verified.
+ARM64e/FAT structural rewriting, arbitrary PC-relative relocation and
+arbitrary in-place __TEXT resizing are still unsupported. Only use on software you are authorized
 to modify; passing CI does not establish iPhone launch or distribution readiness.
