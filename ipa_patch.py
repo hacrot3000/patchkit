@@ -408,11 +408,25 @@ def apply(ipa, manifest, output, *, allow_unsigned=False, sign_identity=None,
         root = Path(temp)
         extract_ipa(ipa, root, max_unpacked_mib * 1024 * 1024)
         app, executable = app_bundle(root)
+        structural = []
+        structural_started = False
         for i, operation in enumerate(operations):
             try:
+                if not isinstance(operation, dict):
+                    raise IPAError("Every operation must be a JSON object")
+                if operation.get("type") in ("inject_arm64", "hook_arm64", "extend_macho"):
+                    structural_started = True
+                    structural.append(operation)
+                    continue
+                if structural_started:
+                    raise IPAError("All Mach-O expansion operations must be last in the manifest")
                 patch_operation(app, executable, operation, manifest.parent)
             except (IPAError, OSError) as exc:
                 raise IPAError("Operation %d failed: %s" % (i + 1, exc)) from exc
+        if structural:
+            from ipa_macho_inject import expand_macho
+            details = expand_macho(executable, structural)
+            print("Mach-O expansion: %s" % json.dumps(details, sort_keys=True))
         if sign_identity:
             resign(app, sign_identity, entitlements, profile)
         repack(root, output)
