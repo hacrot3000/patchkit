@@ -31,8 +31,7 @@ FAT_MAGICS = {
 }
 
 
-class IPAError(ValueError):
-    pass
+from ipa_errors import IPAError
 
 
 def number(value):
