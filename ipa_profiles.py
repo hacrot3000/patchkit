@@ -99,7 +99,11 @@ def validate_profile(profile, bundle_id, entitlements, *, now=None):
         elif key in PROVISIONED_KEYS:
             # Apple still supports restricted entitlements outside this list.
             # Reject only known provisioning-bound capabilities.
-            if key == "com.apple.application-identifier" and "application-identifier" in grants:
+            if (key == "com.apple.application-identifier" and
+                    "application-identifier" in grants):
+                continue
+            if (key == "application-identifier" and
+                    "com.apple.application-identifier" in grants):
                 continue
             raise IPAError("Provisioning profile lacks entitlement: %s" % key)
     devices = profile.get("ProvisionedDevices")
