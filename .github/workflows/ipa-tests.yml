@@ -51,6 +51,6 @@ jobs:
           print("Keystone native library ready")
           PY
       - name: Compile
-        run: python -m py_compile ipa_errors.py ipa_patch.py ipa_macho_inject.py ipa_profiles.py tests/test_ipa_patch.py tests/test_ipa_macho_inject.py tests/test_ipa_profiles.py tests/test_ios_macho_integration.py
+        run: python -m py_compile ipa_errors.py ipa_patch.py ipa_macho_inject.py ipa_profiles.py tools/ipa_device_smoke.py tests/test_ipa_patch.py tests/test_ipa_macho_inject.py tests/test_ipa_profiles.py tests/test_ios_macho_integration.py tests/test_ipa_device_smoke.py
       - name: Unit and integration tests
         run: python -m unittest discover -s tests -v
