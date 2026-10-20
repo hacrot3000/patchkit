@@ -194,6 +194,19 @@ def expand_macho(path, operations, report=None):
         if item["type"] == "hook_arm64":
             verified_hooks[index] = _verify_hook(data, item, disassembler, constants)
     fat, binary = _parse_lief(lief, path)
+    # LIEF can shift __TEXT's virtual addresses when expanding load commands.
+    # Record every hook relative to its original named section, not as a fixed
+    # virtual address, so detours and return branches target the rebuilt image.
+    original_sections = {}
+    for index, (old_addr, _, _) in verified_hooks.items():
+        section = binary.section_from_virtual_address(old_addr)
+        if section is None or not section.name or not section.segment_name:
+            raise IPAError("Cannot identify the source section for hook 0x%x" % old_addr)
+        if old_addr >= section.virtual_address + section.size:
+            raise IPAError("Hook is outside the recognized Mach-O section")
+        original_sections[index] = (
+            section.segment_name, section.name, old_addr - section.virtual_address
+        )
     # Original signature cannot survive executable modifications; top-level IPA
     # signing or explicit --allow-unsigned is handled by ipa_patch.py.
     binary.remove_signature()
@@ -210,7 +223,8 @@ def expand_macho(path, operations, report=None):
         rebuilt = lief.MachO.parse(str(intermediate))
         if rebuilt is None or rebuilt.size != 1:
             raise IPAError("Expanded Mach-O cannot be reparsed by LIEF")
-        new_segment = rebuilt.at(0).get_segment(SEGMENT)
+        rebuilt_binary = rebuilt.at(0)
+        new_segment = rebuilt_binary.get_segment(SEGMENT)
         if new_segment is None:
             raise IPAError("LIEF did not write the injected segment")
         if new_segment.init_protection & 5 != 5 or new_segment.init_protection & 2:
@@ -234,14 +248,19 @@ def expand_macho(path, operations, report=None):
                 named[item["name"]] = address
             else:
                 old_addr, stolen, mode = verified_hooks[index]
+                seg_name, section_name, delta = original_sections[index]
+                relocated = rebuilt_binary.get_section(seg_name, section_name)
+                if relocated is None or delta + len(stolen) > relocated.size:
+                    raise IPAError("Source code section disappeared during Mach-O rebuild")
+                current_addr = int(relocated.virtual_address) + delta
                 if mode == "before":
                     body = _assemble(assembler, item["asm"], address)
                     payload = body + stolen
-                    payload += _branch(address + len(payload), old_addr + len(stolen))
-                    pending.append((old_addr, stolen, address))
+                    payload += _branch(address + len(payload), current_addr + len(stolen))
+                    pending.append((current_addr, stolen, address))
                 else:
                     payload = b""
-                    pending.append((old_addr, stolen, item["symbol"]))
+                    pending.append((current_addr, stolen, item["symbol"]))
             if cursor + len(payload) > capacity or cursor + len(payload) > available:
                 raise IPAError("Injected code exceeds allocated Mach-O code segment")
             raw[start + cursor:start + cursor + len(payload)] = payload
