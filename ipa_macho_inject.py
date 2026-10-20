@@ -10,7 +10,8 @@ import struct
 import tempfile
 from pathlib import Path
 
-from ipa_patch import IPAError, address_to_offset, arm64_slice, hexbytes, number
+from ipa_errors import IPAError
+from ipa_patch import address_to_offset, arm64_slice, hexbytes, number
 
 SEGMENT = "__PKTEXT"
 NOP = bytes.fromhex("1f2003d5")
