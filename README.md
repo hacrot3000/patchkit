@@ -218,16 +218,25 @@ Quick start (unre-signed output, **not installable**):
 python3 ipa_patch.py input.ipa patches.json -o output.ipa --allow-unsigned
 ```
 
+You can verify a patch without producing or signing an IPA:
+
+```sh
+python3 ipa_patch.py input.ipa patches.json --dry-run
+```
+
 For a signed IPA, use `--sign-identity` on macOS with the right signing
 certificate and, where needed, `--entitlements` and `--profile`.
+The original entitlements of each nested signed bundle are retained by default.
 
 See [IPA patch documentation](docs/IPA_PATCHING.md) for the manifest
 schema, examples, required signing, supported operations and limitations.
 Experimental **thin ARM64 Mach-O code expansion and automatic function hooks**
 are implemented using LIEF, Capstone and Keystone. The new `__PKTEXT`
 segment is RX (not RWX); before-hooks can replay verified position-independent
-instructions and return, while replace-hooks can redirect to injected functions.
-ARM64e/FAT structural rewriting, automatic relocation of PC-relative stolen
-instructions, long-range branches, and arbitrary in-place __TEXT resizing
-are not supported and are rejected. Only use on software you are authorized
+instructions (including safely remapped ADR/ADRP) and return, while
+replace-hooks can redirect to injected functions. `auto_patch_arm64` uses
+in-place replacement where possible and inject+hook for longer code; embedded
+framework and extension executables can be targeted. ARM64e/FAT structural
+rewriting, arbitrary PC-relative relocation, long-range branches and arbitrary
+in-place __TEXT resizing are not supported and are rejected. Only use on software you are authorized
 to modify; passing CI does not establish iPhone launch or distribution readiness.
