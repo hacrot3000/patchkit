@@ -49,11 +49,34 @@ def _branch(from_address, to_address):
     displacement = to_address - from_address
     if displacement % 4 or not -BRANCH_RANGE <= displacement < BRANCH_RANGE:
         raise IPAError(
-            "ARM64 B out of +/-128MiB reach: 0x%x -> 0x%x; "
-            "automatic long-range trampolines are not supported"
+            "ARM64 B out of +/-128MiB reach: 0x%x -> 0x%x"
             % (from_address, to_address)
         )
     return struct.pack("<I", 0x14000000 | ((displacement >> 2) & 0x03FFFFFF))
+
+
+def _detour(from_address, to_address, *, permit_x16=False):
+    """Prefer register-free B, else optionally use ADRP/ADD/BR x16.
+
+    Unlike a literal absolute target, the ADRP variant remains correct under
+    ASLR. It is *not* ABI-transparent: x16 is overwritten. Callers must
+    explicitly opt in, including before-hooks that resume original code.
+    """
+    try:
+        return _branch(from_address, to_address)
+    except IPAError:
+        if not permit_x16:
+            raise IPAError(
+                "Hook target beyond +/-128MiB; set long_branch='x16' "
+                "and provide 12 original bytes to opt into an x16-clobbering jump"
+            )
+        if from_address % 4 or to_address % 4:
+            raise IPAError("Long ARM64 branch requires instruction-aligned addresses")
+        return (
+            _encode_pc_relative(16, to_address, from_address, page=True)
+            + _encode_add_low12(16, to_address & 0xFFF)
+            + struct.pack("<I", 0xD61F0200)  # BR x16
+        )
 
 
 def _copyable_stolen(disassembler, constants, original, address):
@@ -188,6 +211,8 @@ def _verify_hook(source, hook, disassembler, constants):
         raise IPAError("Hook overwrite exceeds Mach-O file")
     if source[offset:offset + len(expected)] != expected:
         raise IPAError("Hook expected_hex mismatch at 0x%x" % addr)
+    if hook.get("long_branch") not in (None, "x16"):
+        raise IPAError("long_branch must be 'x16' when specified")
     mode = hook.get("mode", "before")
     if mode not in ("before", "replace"):
         raise IPAError("hook_arm64 mode must be before or replace")
@@ -455,23 +480,32 @@ def expand_macho(path, operations, report=None):
                         address + len(body), original_sections_snapshot, rebuilt_binary
                     )
                     payload = body + replay
-                    payload += _branch(address + len(payload), current_addr + len(stolen))
-                    pending.append((current_addr, stolen, address))
+                    payload += _detour(
+                        address + len(payload), current_addr + len(stolen),
+                        permit_x16=(item.get("long_branch") == "x16")
+                    )
+                    pending.append((current_addr, stolen, address,
+                                    item.get("long_branch") == "x16"))
                 else:
                     payload = b""
-                    pending.append((current_addr, stolen, item["symbol"]))
+                    pending.append((current_addr, stolen, item["symbol"],
+                                    item.get("long_branch") == "x16"))
             if cursor + len(payload) > capacity or cursor + len(payload) > available:
                 raise IPAError("Injected code exceeds allocated Mach-O code segment")
             raw[start + cursor:start + cursor + len(payload)] = payload
             cursor += len(payload)
         patch_sites = []
-        for old_addr, stolen, destination in pending:
+        for old_addr, stolen, destination, permit_x16 in pending:
             target = named[destination] if isinstance(destination, str) else destination
-            branch = _branch(old_addr, target)
+            branch = _detour(old_addr, target, permit_x16=permit_x16)
+            if len(branch) > len(stolen):
+                raise IPAError("Hook requires %d original bytes, got %d" %
+                               (len(branch), len(stolen)))
             pos = address_to_offset(raw, selected, old_addr)
             if raw[pos:pos + len(stolen)] != stolen:
                 raise IPAError("Hook original bytes changed during Mach-O reconstruction")
-            patch_sites.append((pos, stolen, branch + NOP * (len(stolen) // 4 - 1)))
+            patch_sites.append((pos, stolen, branch +
+                                NOP * ((len(stolen) - len(branch)) // 4)))
         # Two detours may not overwrite overlapping ranges.
         occupied = set()
         for pos, previous, patched in patch_sites:
