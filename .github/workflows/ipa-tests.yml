@@ -26,6 +26,30 @@ jobs:
           python-version: '3.11'
       - name: Install ARM64 Mach-O dependencies
         run: python -m pip install keystone-engine==0.9.2 'capstone>=5,<6' 'lief>=0.17,<2'
+      - name: Install native Keystone runtime on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install keystone
+          python - <<'PY'
+          import importlib.util
+          import os
+          import pathlib
+          import subprocess
+          module = importlib.util.find_spec("keystone")
+          directory = pathlib.Path(list(module.submodule_search_locations)[0])
+          prefix = pathlib.Path(subprocess.check_output(
+              ["brew", "--prefix", "keystone"], text=True).strip())
+          source = prefix / "lib" / "libkeystone.dylib"
+          dest = directory / "libkeystone.dylib"
+          if not source.is_file():
+              raise RuntimeError("Missing Homebrew Keystone runtime: " + str(source))
+          if dest.is_symlink():
+              dest.unlink()
+          if not dest.exists():
+              dest.symlink_to(source)
+          from keystone import Ks
+          print("Keystone native library ready")
+          PY
       - name: Compile
         run: python -m py_compile ipa_patch.py ipa_macho_inject.py tests/test_ipa_patch.py tests/test_ipa_macho_inject.py
       - name: Unit and integration tests
