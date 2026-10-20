@@ -112,6 +112,24 @@ class MachOIntegration(unittest.TestCase):
             self.assertGreaterEqual(segment.file_size, 0x4000)
             self.assertIn(bytes.fromhex("e00080d2"), raw)
 
+    def test_expanded_executable_can_be_ad_hoc_signed(self):
+        import lief
+        raw = self.patch([
+            {"type": "inject_arm64", "name": "probe", "asm": "mov x0, #7; ret"},
+        ])
+        executable = self.root / "signed-test-arm64"
+        executable.write_bytes(raw)
+        executable.chmod(0o755)
+        subprocess.run(["codesign", "--force", "--sign", "-",
+                        "--timestamp=none", str(executable)],
+                       check=True, capture_output=True, text=True)
+        subprocess.run(["codesign", "--verify", "--strict",
+                        str(executable)],
+                       check=True, capture_output=True, text=True)
+        self.assertIsNotNone(
+            lief.MachO.parse(str(executable)).at(0).get_segment("__PKTEXT")
+        )
+
     def test_hook_before_and_return(self):
         import lief
         raw = self.patch([
