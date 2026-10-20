@@ -231,6 +231,10 @@ Any embedded provisioning profiles are checked against each signed bundle's
 identifier, team, entitlements and expiry. Use `--require-profiles` to reject
 missing extension profiles when preparing an installable release.
 
+The optional [iPhone smoke-test procedure](docs/IPA_DEVICE_VALIDATION.md)
+provides signature verification, explicit install/launch and a manual checklist
+for use on a paired Mac/iPhone; no device is connected to CI.
+
 See [IPA patch documentation](docs/IPA_PATCHING.md) for the manifest
 schema, examples, required signing, supported operations and limitations.
 Experimental **thin ARM64 Mach-O code expansion and automatic function hooks**
