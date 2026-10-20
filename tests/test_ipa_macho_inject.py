@@ -55,6 +55,20 @@ class BranchValidation(unittest.TestCase):
         with self.assertRaisesRegex(IPAError, "21-bit"):
             _detour(0x1000, 0x1000 + (1 << 34), permit_x16=True)
 
+    def test_ldr_literal_out_of_range_is_rejected(self):
+        from ipa_macho_inject import _encode_literal_load
+        class Dummy:
+            def get_section(self, segment, section):
+                class Destination:
+                    virtual_address = 0x80000000
+                return Destination()
+        with self.assertRaisesRegex(IPAError, "reach"):
+            _encode_literal_load(
+                struct.pack("<I", 0x58000000),
+                0x1010, 0x1000,
+                [("__TEXT", "__text", 0x1000, 0x100)], Dummy()
+            )
+
     @unittest.skipUnless(HAVE_NATIVE, "Capstone/Keystone not installed")
     def test_refuses_pc_relative_relocation(self):
         from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM, arm64_const
@@ -76,7 +90,7 @@ class MachOIntegration(unittest.TestCase):
         cls.root = Path(cls.tmp.name)
         cls.binary = cls.root / "test_arm64"
         cls.source = cls.root / "test_arm64.s"
-        cls.source.write_text(".globl _main\n.p2align 2\n_main:\n nop\n mov x0, #0\n ret\n")
+        cls.source.write_text(".globl _main\n.p2align 2\n_main:\n nop\n mov x0, #0\n ret\n.p2align 3\n_probe_literal:\n .quad 7\n")
         compiler = shutil.which("clang")
         if sys.platform != "darwin" or not compiler:
             raise unittest.SkipTest("Real Mach-O fixture is compiled on macOS CI")
@@ -93,6 +107,7 @@ class MachOIntegration(unittest.TestCase):
         if section is None:
             raise RuntimeError("Fixture missing __text")
         cls.address = int(section.virtual_address)
+        cls.literal_address = int(section.virtual_address) + int(section.size) - 8
 
     @classmethod
     def tearDownClass(cls):
@@ -302,6 +317,31 @@ class MachOIntegration(unittest.TestCase):
         self.assertEqual(read_entitlements(finished), {"get-task-allow": True})
         self.assertEqual(read_entitlements(finished / "PlugIns" / "Widget.appex"),
                          {"get-task-allow": False})
+
+    def test_before_hook_relocates_ldr_literal_and_executes(self):
+        import lief
+        displacement = self.literal_address - self.address
+        self.assertEqual(displacement % 4, 0)
+        # LDR X0 literal with 19-bit signed PC-relative displacement.
+        original = struct.pack("<I",
+                               0x58000000 | (((displacement // 4) & 0x7ffff) << 5))
+        raw = self.patch([
+            {"type": "patch_address", "address": hex(self.address),
+             "expected_hex": "1f2003d5", "new_hex": original.hex()},
+            {"type": "patch_address", "address": hex(self.address + 4),
+             "expected_hex": "000080d2", "new_hex": "1f2003d5"},
+            {"type": "hook_arm64", "mode": "before",
+             "address": hex(self.address), "expected_hex": original.hex(),
+             "asm": "nop"}
+        ])
+        executable = self.root / (self._testMethodName + "-program")
+        executable.write_bytes(raw)
+        executable.chmod(0o755)
+        subprocess.run(["codesign", "--force", "--sign", "-",
+                        "--timestamp=none", str(executable)],
+                       check=True, capture_output=True)
+        proc = subprocess.run([str(executable)], capture_output=True, timeout=10)
+        self.assertEqual(proc.returncode, 7, proc.stderr)
 
     def test_execute_patched_arm64_program(self):
         # Unlike structure-only tests, this exercises dyld and the detour.
