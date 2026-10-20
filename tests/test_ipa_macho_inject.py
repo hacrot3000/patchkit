@@ -61,7 +61,7 @@ class MachOIntegration(unittest.TestCase):
         if sys.platform != "darwin" or not compiler:
             raise unittest.SkipTest("Real Mach-O fixture is compiled on macOS CI")
         proc = subprocess.run([
-            compiler, "-arch", "arm64", "-nostdlib", "-Wl,-e,_main",
+            compiler, "-arch", "arm64", "-Wl,-e,_main",
             "-o", str(cls.binary), str(cls.source)
         ], capture_output=True, text=True)
         if proc.returncode:
